@@ -26,11 +26,6 @@ function renderBoard() {
   if (lastBoard === signature) return; lastBoard = signature;
   $('#project-tabs').innerHTML = [{id:'',name:'All projects'}, ...data.projects].map(p => `<button class="project-tab ${p.id===projectId?'active':''}" data-project="${escape(p.id)}" aria-current="${p.id===projectId?'page':'false'}" title="${escape(p.path || 'All projects')}">${escape(p.name)}</button>`).join('');
   const tasks = data.tasks.filter(t => !projectId || t.project_id === projectId);
-  $('#project-path').textContent = project(projectId)?.path || 'All projects';
-  $('#task-count').textContent = `${tasks.length} task${tasks.length===1?'':'s'}`;
-  $('#queue-button').disabled = false;
-  $('#queue-button').textContent = data.settings.paused ? 'Queue paused' : 'Queue active';
-  $('#queue-button').title = data.settings.paused ? 'Resume queue' : 'Pause queue';
   $('#board').innerHTML = states.map(status => {
     const items = tasks.filter(t => t.status === status).sort((a,b) => status === 'todo' ? a.queued_at-b.queued_at : b.created_at-a.created_at);
     return `<section class="column" data-status="${status}" aria-label="${status} tasks"><div class="column-head"><h2>${status[0].toUpperCase()+status.slice(1)} <span class="column-count">${items.length}</span></h2><button class="icon-button" data-new="${status === 'future' ? 'future' : 'todo'}" aria-label="Add task from ${status}">+</button></div><div class="column-tasks">${items.map(card).join('') || '<p class="empty-column">No tasks</p>'}</div></section>`;
@@ -207,7 +202,6 @@ $('#project-tabs').onclick=e=>{const tab=e.target.closest('[data-project]');if(t
 $('#add-project-tab').onclick=()=>{if(data)addProject();};
 $('#add-project-button').onclick=()=>{if(data)addProject();};
 $('#new-task-button').onclick=()=>{if(data)newTask();};
-$('#queue-button').onclick=()=>{if(data)act({action:'settings',...data.settings,paused:!data.settings.paused});};
 document.addEventListener('click',e=>{document.querySelectorAll('.app-menu[open]').forEach(menu=>{if(!menu.contains(e.target)||e.target.closest('button'))menu.open=false;});});
 $('#settings-button').onclick=()=>{if(data)settings();};
 $('#board').onclick=e=>{const card=e.target.closest('[data-task]');const add=e.target.closest('[data-new]');if(card)openTask(card.dataset.task);else if(add)newTask(add.dataset.new);};
@@ -229,4 +223,4 @@ document.onkeydown=e=>{
 };
 setInterval(()=>{if(!data)return;document.querySelectorAll('[data-cleanup]').forEach(el=>{const t=task(el.dataset.cleanup);if(t?.cleanup_at)el.textContent=cleanupLabel(t);});document.querySelectorAll('[data-timer]').forEach(el=>{const t=task(el.dataset.timer);if(t)el.textContent=`${t.status==='now'?'◷ ':''}${duration(elapsed(t))}`;});},1000);
 let disconnected = false;
-async function poll(){try{await refresh();$('#connection-status').textContent='Connected';}catch(e){if(!disconnected)toast('Server disconnected');disconnected=true;$('#connection-status').textContent='Disconnected';}setTimeout(poll,1200);}poll();
+async function poll(){try{await refresh();}catch(e){if(!disconnected)toast('Server disconnected');disconnected=true;}setTimeout(poll,1200);}poll();

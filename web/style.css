@@ -71,11 +71,6 @@ main { height: 100dvh; display: flex; flex-direction: column; overflow: hidden; 
 .card-error { color: var(--red); }
 .task-card[draggable=true] { cursor: grab; }
 .task-card[draggable=true]:active { cursor: grabbing; }
-.statusbar { min-height: 28px; display: flex; align-items: center; background: var(--surface); border-top: 1px solid var(--border); color: var(--muted); font-size: .75rem; }
-.statusbar > * { padding: 3px 12px; white-space: nowrap; }
-.statusbar > * + * { border-left: 1px solid var(--border); }
-#project-path { flex: 1; overflow: hidden; text-overflow: ellipsis; }
-#queue-button { align-self: stretch; font-size: .75rem; }
 .overlay { position: fixed; inset: 0; background: #0008; z-index: 10; }
 .task-panel { position: fixed; inset: 0 0 0 auto; width: min(740px, 100vw); background: var(--bg); border-left: 1px solid #363636; z-index: 11; display: flex; flex-direction: column; }
 .panel-header { display: flex; align-items: center; gap: 6px; padding: 4px 10px; flex-shrink: 0; border-bottom: 1px solid var(--border); background: var(--surface); }
@@ -146,9 +141,6 @@ dialog.fullscreen .dialog-body { flex: 1; min-height: 0; max-height: none; displ
   .app-name { display: none; }
   .project-tabs { flex: 1; }
   .project-tab { min-width: 110px; padding-inline: 12px; }
-  .statusbar > * { padding-inline: 8px; }
-  #project-path { display: none; }
-  #task-count { flex: 1; }
   .row { flex-direction: column; gap: 0; }
   .messages, .composer { padding: 12px; }
   dialog.fullscreen .dialog-body { padding: 12px; }
