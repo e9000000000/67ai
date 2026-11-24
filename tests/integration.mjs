@@ -28,6 +28,9 @@ async function start() {
 async function stop() { const done=new Promise(r=>server.once('exit',r));server.kill();await done; }
 try {
   await start();
+  const page = await fetch(url);
+  const imageSources = page.headers.get('content-security-policy').split(';').map(s=>s.trim().split(/\s+/)).find(s=>s[0]==='img-src');
+  assert(imageSources.includes('blob:'), 'Local attachment previews need blob: image URLs');
   const duplicate=spawnSync(path.resolve('target/debug/taskdesk.exe'),[],{env:{...process.env,TASKDESK_PORT:'3033',TASKDESK_DATA_DIR:root},windowsHide:true,encoding:'utf8',timeout:3000});
   assert.equal(duplicate.status,1);assert.match(duplicate.stderr,/already open/);
   let d=await state();const settings={...d.settings,paused:true};await action({action:'settings',...settings});

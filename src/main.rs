@@ -277,7 +277,7 @@ async fn local_only(headers: HeaderMap, req: axum::extract::Request, next: axum:
     let mut response = next.run(req).await;
     response.headers_mut().insert("cache-control", "no-store".parse().unwrap());
     response.headers_mut().insert("x-content-type-options", "nosniff".parse().unwrap());
-    response.headers_mut().insert("content-security-policy", "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'".parse().unwrap());
+    response.headers_mut().insert("content-security-policy", "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data: blob:; frame-ancestors 'none'".parse().unwrap());
     response
 }
 
