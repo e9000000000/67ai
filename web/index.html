@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>67ai</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script></head>
+<body>
+<main>
+<header class="topbar"><details class="app-menu"><summary aria-label="Application menu" title="Menu"><span class="burger"></span></summary><div class="menu-items"><button id="new-task-button">New task</button><button id="add-project-button">Add project</button><button id="settings-button">Settings</button></div></details><nav id="project-tabs" class="project-tabs" aria-label="Projects"></nav><button id="add-project-tab" class="add-project" aria-label="Add project" title="Add project">+</button><span class="app-name">Taskdesk</span></header>
+<section class="board" aria-label="Task board" id="board"></section>
+<footer class="statusbar"><span id="connection-status" role="status">Connecting…</span><span id="project-path"></span><span id="task-count"></span><button id="queue-button" disabled>Queue</button></footer>
+</main>
+<div id="overlay" class="overlay" hidden></div>
+<aside id="task-panel" class="task-panel" role="dialog" aria-modal="true" aria-label="Task details" hidden></aside>
+<dialog id="dialog"><div id="dialog-content"></div></dialog>
+<div id="toast" class="toast" role="status" hidden></div>
+</body></html>
