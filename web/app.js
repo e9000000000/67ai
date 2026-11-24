@@ -46,7 +46,7 @@ function modal(title, body, wide = false, fullscreen = false) {
 }
 function formSubmit(handler, onSuccess = () => $('#dialog').close()) {
   $('#modal-form').onsubmit = async e => {
-    e.preventDefault(); const button = $('button[type=submit]', e.target); button.disabled = true;
+    e.preventDefault(); const button = $('button[type=submit]', e.target); if(button.disabled)return; button.disabled = true;
     try { await handler(new FormData(e.target)); onSuccess(); }
     catch (err) { $('#form-error').textContent = err.message; }
     finally { button.disabled = false; }
@@ -109,15 +109,15 @@ function newTask(status = 'todo') {
   modal('New task', `<form id="modal-form" class="new-task-form"><label class="field"><span>Title</span><input name="title" placeholder="What should the agent work on?" required autofocus maxlength="200"></label><div class="field instructions-field"><label for="task-instructions">Instructions</label><textarea id="task-instructions" name="text" placeholder="Describe the outcome, relevant details, and how to check the result..." required></textarea></div><div class="new-task-footer"><label class="field"><span>Project</span><select name="project_id">${data.projects.map(p=>`<option value="${p.id}" ${p.id===projectId?'selected':''}>${escape(p.name)}</option>`).join('')}</select></label><label class="field"><span>Model</span><select name="model">${modelOptions()}</select></label><button type="submit" class="button primary">Create task</button></div><p class="form-error" id="form-error" role="alert"></p></form>`, false, true);
   const attachments = attachFiles($('#task-instructions'));
   formSubmit(async f => { await api({action:'create_task',...Object.fromEntries(f),status,attachments:await attachments.upload()}); });
+  $('#modal-form').onkeydown=e=>{if(e.key==='Enter'&&(e.ctrlKey||e.metaKey)){e.preventDefault();e.currentTarget.requestSubmit();}};
 }
 function openTask(key) {
   $('#task-panel').clearAttachments?.();
   selectedTask=key; lastMessages=''; const t=task(key); if(!t) return closeTask();
   $('#overlay').hidden=false; $('#task-panel').hidden=false;
   $('main').inert=true;
-  $('#task-panel').innerHTML=`<div class="panel-header"><div class="panel-top"><span>${escape(project(t.project_id)?.name)} / Task</span><button id="close-task" class="icon-button" aria-label="Close task">×</button></div><h2 id="panel-title"></h2><div class="panel-meta"><select id="task-status" aria-label="Task state">${states.map(s=>`<option value="${s}" ${s==='now'?'disabled':''}>${s[0].toUpperCase()+s.slice(1)}</option>`).join('')}</select><select id="task-model" aria-label="Task model">${modelOptions(t.model)}</select><span id="task-elapsed" class="elapsed"></span></div></div><div class="panel-tabs"><span class="active">Conversation</span><button id="task-agents" class="button small quiet">AGENTS.md</button><button id="edit-task" class="icon-button" aria-label="Edit task title">✎</button><button id="delete-task" class="icon-button" aria-label="Delete task">⌫</button></div><div class="approval-bar" id="approval-bar" hidden><span id="approval-status"></span><button id="approve-task" class="button primary small">Approve</button><button id="revive-task" class="button small" hidden>Revive - cancel cleanup</button></div><div class="messages" id="messages"></div><form class="composer" id="message-form"><textarea id="message-input" placeholder="Add details or ask Codex to continue…" aria-label="Message to Codex" required></textarea><div class="composer-bottom"><span class="composer-hint" id="composer-hint"></span><button id="stop-task" type="button" class="button danger small" hidden>Stop</button><button type="submit" class="button primary small">Send message</button></div></form>`;
+  $('#task-panel').innerHTML=`<div class="panel-header"><h2 id="panel-title"></h2><details class="app-menu task-menu"><summary aria-label="Task menu" title="Task menu"><span class="burger"></span></summary><div class="menu-items"><label class="field"><span>Model</span><select id="task-model" aria-label="Task model">${modelOptions(t.model)}</select></label><button id="task-agents">AGENTS.md</button><button id="edit-task">Edit title</button><button id="delete-task">Delete task</button><button id="stop-task" hidden>Stop</button></div></details><button id="approve-task" class="button primary small" title="Approve and clean up this task and its Codex session in 30 minutes. Project files stay." hidden>Approve</button><button id="revive-task" class="button small" title="Cancel cleanup" hidden>Revive</button><button id="close-task" class="icon-button" aria-label="Close task">×</button></div><div class="messages" id="messages"></div><form class="composer" id="message-form"><textarea id="message-input" placeholder="Add details or ask Codex to continue…" aria-label="Message to Codex" required></textarea></form>`;
   $('#close-task').onclick=closeTask;
-  $('#task-status').onchange=async e=>{await act({action:'move_task',id:key,status:e.target.value});refreshPanel();};
   $('#task-model').onchange=async e=>{await act({action:'edit_task',id:key,title:task(key).title,model:e.target.value});refreshPanel();};
   $('#task-agents').onclick=()=>openAgents(t.project_id);
   $('#edit-task').onclick=()=>{
@@ -135,10 +135,11 @@ function openTask(key) {
   $('#stop-task').onclick=()=>act({action:'stop_task',id:key});
   const attachments = attachFiles($('#message-input'));
   $('#task-panel').clearAttachments = attachments.clear;
+  let sending = false;
   $('#message-form').onsubmit=async e=>{
-    e.preventDefault();const input=$('#message-input');const text=input.value;
-    const button=$('button[type=submit]',e.target);button.disabled=true;
-    try{await api({action:'send_message',id:key,text,attachments:await attachments.upload()});input.value='';attachments.clear();$('#messages').scrollTop=$('#messages').scrollHeight;}catch(err){toast(err.message);}finally{button.disabled=false;}
+    e.preventDefault();if(sending)return;const input=$('#message-input');const text=input.value;
+    sending=true;input.readOnly=true;
+    try{await api({action:'send_message',id:key,text,attachments:await attachments.upload()});input.value='';attachments.clear();$('#messages').scrollTop=$('#messages').scrollHeight;}catch(err){toast(err.message);}finally{sending=false;input.readOnly=false;}
   };
   $('#message-input').onkeydown=e=>{if(e.key==='Enter'&&(e.ctrlKey||e.metaKey)){e.preventDefault();$('#message-form').requestSubmit();}};
   refreshPanel();
@@ -146,16 +147,12 @@ function openTask(key) {
 }
 function refreshPanel() {
   const t=task(selectedTask);if(!t)return closeTask();
-  $('#panel-title').textContent=t.title;$('#task-status').value=t.status;$('#task-status').disabled=t.status==='now';
+  $('#panel-title').textContent=t.title;$('#panel-title').title=t.title;
   $('#task-model').disabled=t.status==='now';$('#task-model').value=t.model;
   $('#edit-task').disabled=t.status==='now';$('#delete-task').disabled=t.status==='now';
-  $('#task-elapsed').textContent=`◷ ${duration(elapsed(t))} total`;
   $('#stop-task').hidden=t.status!=='now';$('#stop-task').disabled=t.cancel;$('#stop-task').textContent=t.cancel?'Stopping…':'Stop';
-  $('#composer-hint').textContent=t.status==='future'?'Saved here until you move the task to todo.':t.status==='now'?'Your message queues a follow-up after this run.':'Sending queues a Codex reply. Ctrl+Enter to send.';
-  $('#approval-bar').hidden=t.status!=='done';
-  $('#approve-task').hidden=!!t.cleanup_at;
-  $('#revive-task').hidden=!t.cleanup_at;
-  $('#approval-status').textContent=t.cleanup_at ? cleanupLabel(t) : 'Approve to remove this task, its conversation and Codex session in 30 minutes. Project files stay.';
+  $('#approve-task').hidden=t.status!=='done'||!!t.cleanup_at;
+  $('#revive-task').hidden=t.status!=='done'||!t.cleanup_at;
   const signature=JSON.stringify([t.messages,t.error]);if(signature===lastMessages)return;lastMessages=signature;
   const messages=$('#messages');const atBottom=messages.scrollHeight-messages.scrollTop-messages.clientHeight<90||!messages.innerHTML;
   const opened=[...messages.querySelectorAll('details[open]')].map(el=>el.dataset.index);
@@ -211,7 +208,7 @@ $('#add-project-tab').onclick=()=>{if(data)addProject();};
 $('#add-project-button').onclick=()=>{if(data)addProject();};
 $('#new-task-button').onclick=()=>{if(data)newTask();};
 $('#queue-button').onclick=()=>{if(data)act({action:'settings',...data.settings,paused:!data.settings.paused});};
-document.addEventListener('click',e=>{if(!e.target.closest('.app-menu summary'))$('.app-menu').open=false;});
+document.addEventListener('click',e=>{document.querySelectorAll('.app-menu[open]').forEach(menu=>{if(!menu.contains(e.target)||e.target.closest('button'))menu.open=false;});});
 $('#settings-button').onclick=()=>{if(data)settings();};
 $('#board').onclick=e=>{const card=e.target.closest('[data-task]');const add=e.target.closest('[data-new]');if(card)openTask(card.dataset.task);else if(add)newTask(add.dataset.new);};
 $('#board').ondragstart=e=>{const card=e.target.closest('[data-task]');if(card)e.dataTransfer.setData('text/plain',card.dataset.task);};
@@ -221,7 +218,7 @@ $('#board').ondragend=()=>document.querySelectorAll('.dragover').forEach(c=>c.cl
 $('#board').ondrop=e=>{e.preventDefault();document.querySelectorAll('.dragover').forEach(c=>c.classList.remove('dragover'));const column=e.target.closest('.column');const id=e.dataTransfer.getData('text/plain');if(column&&task(id)&&column.dataset.status!=='now')act({action:'move_task',id,status:column.dataset.status});};
 $('#overlay').onclick=closeTask;
 document.onkeydown=e=>{
-  if(e.key==='Escape')$('.app-menu').open=false;
+  if(e.key==='Escape')document.querySelectorAll('.app-menu[open]').forEach(menu=>menu.open=false);
   if(e.key==='Escape'&&!$('#dialog').open)closeTask();
   if(e.key==='Tab'&&selectedTask&&!$('#dialog').open){
     const controls=[...$('#task-panel').querySelectorAll('button,select,textarea,summary')].filter(el=>!el.disabled&&el.getClientRects().length);
@@ -230,6 +227,6 @@ document.onkeydown=e=>{
     else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first.focus();}
   }
 };
-setInterval(()=>{if(!data)return;document.querySelectorAll('[data-cleanup]').forEach(el=>{const t=task(el.dataset.cleanup);if(t?.cleanup_at)el.textContent=cleanupLabel(t);});if(selectedTask&&task(selectedTask)?.cleanup_at)$('#approval-status').textContent=cleanupLabel(task(selectedTask));document.querySelectorAll('[data-timer]').forEach(el=>{const t=task(el.dataset.timer);if(t)el.textContent=`${t.status==='now'?'◷ ':''}${duration(elapsed(t))}`;});if(selectedTask&&task(selectedTask))$('#task-elapsed').textContent=`◷ ${duration(elapsed(task(selectedTask)))} total`;},1000);
+setInterval(()=>{if(!data)return;document.querySelectorAll('[data-cleanup]').forEach(el=>{const t=task(el.dataset.cleanup);if(t?.cleanup_at)el.textContent=cleanupLabel(t);});document.querySelectorAll('[data-timer]').forEach(el=>{const t=task(el.dataset.timer);if(t)el.textContent=`${t.status==='now'?'◷ ':''}${duration(elapsed(t))}`;});},1000);
 let disconnected = false;
 async function poll(){try{await refresh();$('#connection-status').textContent='Connected';}catch(e){if(!disconnected)toast('Server disconnected');disconnected=true;$('#connection-status').textContent='Disconnected';}setTimeout(poll,1200);}poll();
