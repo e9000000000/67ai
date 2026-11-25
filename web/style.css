@@ -105,6 +105,8 @@ dialog::backdrop { background: #0009; }
 .dialog-body { padding: 20px; overflow: auto; max-height: 75dvh; }
 .field { display: block; margin-bottom: 16px; }
 .field > span { display: block; font-size: .875rem; color: var(--muted); margin-bottom: 7px; }
+.field:has(> input[type="checkbox"]) { display: flex; align-items: center; gap: 8px; }
+.field:has(> input[type="checkbox"]) > span { margin-bottom: 0; }
 .help { font-size: .875rem; color: var(--muted); line-height: 1.65; margin: 7px 0 16px; }
 .row { display: flex; gap: 14px; }
 .row > * { flex: 1; min-width: 0; }
