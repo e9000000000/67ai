@@ -43,6 +43,7 @@ try {
   let d=await until(d=>d.tasks.find(t=>t.id===id)?.cleanup_at);
   let t=d.tasks.find(t=>t.id===id);
   assert.equal(t.thread_id,original.thread_id);assert.equal(t.model,'easy-model');
+  assert(t.session_ids.includes(original.thread_id));assert(t.session_ids.includes('review-session'));
   assert.equal(t.messages.at(-1).role,'reviewer');assert.match(t.messages.at(-1).text,/Approved/);
   await action({action:'ai_approve_task',id},400);
 

@@ -111,7 +111,7 @@ fn content_task(d: &Data, p: &ContentPlan, title: String, text: String, research
     let mut t = Task { blocker_id: None, content_planning: false, id: id(), project_id: p.project_id.clone(), title,
         model: if research { d.settings.gen_model.clone() } else { d.settings.hard_model.clone() },
         difficulty: Some(if research { Difficulty::Gen } else { Difficulty::Hard }), status: "todo".into(), messages: vec![],
-        created_at: now(), queued_at: now(), elapsed_ms: 0, started_at: None, thread_id: None, error: None, sent_count: 0,
+        created_at: now(), queued_at: now(), elapsed_ms: 0, started_at: None, thread_id: None, session_ids: vec![], error: None, sent_count: 0,
         cancel: false, cleanup_at: None, attention: None, worktree: None, awaiting_merge: false, merging: false,
         review_pending: false, review_attempted: false, content_plan_id: Some(p.id.clone()), content_revision: p.revision, implementation_completed: false };
     t.message("user", text);
