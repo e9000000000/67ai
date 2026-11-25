@@ -234,4 +234,8 @@ fn main() {
         println!(r#"{{"type":"item.completed","item":{{"type":"agent_message","text":"{{\"outcome\":\"{outcome}\",\"message\":\"Test response\"}}"}}}}"#);
     }
     println!(r#"{{"type":"turn.completed","usage":{{}}}}"#);
+    if prompt.contains("LINGER_TEST") {
+        std::io::stdout().flush().unwrap();
+        std::thread::sleep(Duration::from_secs(60));
+    }
 }

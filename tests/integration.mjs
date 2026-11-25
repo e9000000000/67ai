@@ -113,7 +113,16 @@ try {
   assert.equal(d.tasks.find(t=>t.id===failed).status,'done');
   assert.equal(d.tasks.find(t=>t.id===failed).attention,'failed');await delay(800);
   assert.equal((await state()).tasks.find(t=>t.id===failed).messages.filter(m=>m.text==='Codex started working.').length,1);
-  for (const [marker, outcome] of [['QUESTION_TEST','question'],['BLOCKED_TEST','blocked'],['REFUSED_TEST','refused'],['UNSTRUCTURED_TEST','unconfirmed']]) {
+  const lingering=await create(a,'LINGER_TEST SHELL_PROCESS');
+  d=await until(d=>d.tasks.find(t=>t.id===lingering).status==='done',8000);
+  const completed=d.tasks.find(t=>t.id===lingering);
+  assert.equal(completed.attention,null);
+  assert.equal(completed.error,null);
+  assert.equal(completed.implementation_completed,true);
+  const liveShells=await (await fetch(`${url}/api/shells`)).json();
+  assert(liveShells.some(s=>s.task_id===lingering), 'Finishing Codex must preserve the task background server');
+  await writeFile(path.join(projectA,'shell.stop'),'');
+  for (const [marker, outcome] of [['LINGER_TEST QUESTION_TEST','question'],['BLOCKED_TEST','blocked'],['REFUSED_TEST','refused'],['UNSTRUCTURED_TEST','unconfirmed']]) {
     const key=await create(a,marker);
     d=await until(d=>d.tasks.find(t=>t.id===key).status==='done');
     const unfinished=d.tasks.find(t=>t.id===key);

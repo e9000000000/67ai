@@ -711,6 +711,8 @@ async fn run_codex_inner(app: &App, task: &Task, project: &Project, settings: &S
     let mut stdout_done = false;
     let mut stderr_done = false;
     let mut completed = false;
+    let mut completed_at = None;
+    let mut stopped_after_completion = false;
     let mut failed = false;
     let mut limited = false;
     let mut gen_reply = None;
@@ -721,7 +723,10 @@ async fn run_codex_inner(app: &App, task: &Task, project: &Project, settings: &S
         tokio::select! {
             line = out.next_line(), if !stdout_done => match line.map_err(|e| e.to_string())? {
                 Some(line) => if let Ok(value) = serde_json::from_str::<Value>(&line) {
-                    if value["type"] == "turn.completed" { completed = true; }
+                    if value["type"] == "turn.completed" {
+                        completed = true;
+                        completed_at.get_or_insert_with(tokio::time::Instant::now);
+                    }
                     if matches!(value["type"].as_str(), Some("turn.failed" | "error")) && limit_error(&value.to_string()) {
                         limited = true;
                     }
@@ -761,20 +766,27 @@ async fn run_codex_inner(app: &App, task: &Task, project: &Project, settings: &S
                 if child.try_wait().map_err(|e| e.to_string())?.is_some() {
                     let exited = exited_at.get_or_insert_with(tokio::time::Instant::now);
                     if exited.elapsed() >= std::time::Duration::from_millis(250) { break; }
+                } else if completed_at.is_some_and(|at| at.elapsed() >= std::time::Duration::from_secs(2)) {
+                    // The turn is over; CLI shutdown must not keep the task running.
+                    // Kill only Codex, retaining successful task programs in their job.
+                    child.kill().await.map_err(|e| e.to_string())?;
+                    stopped_after_completion = true;
+                    break;
                 }
                 if now().saturating_sub(last_checkpoint) >= 5000 {
                     let d = store.data.clone(); store.commit(d)?; last_checkpoint = now();
                 }
             }
         }
-        if stdout_done && stderr_done { break; }
+        if stdout_done && stderr_done && child.try_wait().map_err(|e| e.to_string())?.is_some() { break; }
     }
     let status = child.wait().await.map_err(|e| e.to_string())?;
-    if limited || ((!status.success() || !completed || failed) && limit_error(&stderr)) {
+    let successful_exit = status.success() || stopped_after_completion;
+    if limited || ((!successful_exit || !completed || failed) && limit_error(&stderr)) {
         pause_for_limit(app, &settings.codex_path).await?;
         return Err(LIMIT_PAUSED.into());
     }
-    if !status.success() || !completed || failed {
+    if !successful_exit || !completed || failed {
         return Err(format!("Codex did not finish successfully ({status}). {}", stderr.trim()));
     }
     if recovery && recovery_state.attention.is_some() { return Err("Hard-model recovery is unfinished. See the recovery messages and retry when resolved.".into()); }
