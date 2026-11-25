@@ -29,7 +29,7 @@
 # playwrite and other ways to interact with browser
 - only headless mode (except final test of the game)
 - if you runing a server - don't make it so it opens tab automatically in existing browser
-- turn off sound (mute tab, for example), while testing. except you need sound to be played for tests.
+- All agents must keep all app testing completely silent, including final tests. Mute the app or browser before testing and keep it muted throughout. Never trigger audible barking, notifications, speech, music, or other sounds. Verify audio behavior through silent checks; never enable sound for tests.
 
 
 # computer cpu/gpu/ram usage
