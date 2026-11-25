@@ -32,6 +32,43 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     assert!(args.iter().any(|a| a == "--dangerously-bypass-approvals-and-sandbox"));
     assert!(!args.iter().any(|a| a == "--sandbox" || a.starts_with("approval_policy=")));
+    if prompt.contains("You are running a Gen task.") {
+        assert!(args.windows(2).any(|a| a == ["--model", "gen-test-model"]));
+        assert!(prompt.contains("NEVER implement anything"));
+        assert!(prompt.contains("reverse engineering"));
+        assert!(prompt.contains("Existing project tasks"));
+        let schema_index = args.iter().position(|a| a == "--output-schema").unwrap();
+        assert!(std::fs::read_to_string(&args[schema_index + 1]).unwrap().contains("\"tasks\""));
+        let dir = std::path::PathBuf::from(std::env::var("67AI_DATA_DIR").unwrap());
+        let mut log = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("gen-runs.jsonl")).unwrap();
+        writeln!(log, "{args:?}\n{prompt}").unwrap();
+        let title = prompt.lines().next().unwrap();
+        println!(r#"{{"type":"thread.started","thread_id":"gen-session"}}"#);
+        std::io::stdout().flush().unwrap();
+        std::thread::sleep(Duration::from_millis(if title.contains("GEN_STOP") { 4000 } else { 500 }));
+        if title.contains("GEN_INVALID") {
+            println!(r#"{{"type":"item.completed","item":{{"type":"agent_message","text":"Invalid Gen response"}}}}"#);
+        } else {
+            let (outcome, tasks) = if title.contains("GEN_QUESTION") { ("question", "[]") }
+                else if title.contains("GEN_BLOCKED") { ("blocked", "[]") }
+                else if title.contains("GEN_REFUSED") { ("refused", "[]") }
+                else if title.contains("GEN_EMPTY") { ("completed", "[]") }
+                else if title.contains("GEN_BAD_TASK") { ("completed", r#"[{\"title\":\"\",\"text\":\"Invalid\"}]"#) }
+                else if prompt.lines().any(|line| line.starts_with("GEN_MORE_REQUEST")) {
+                    assert!(prompt.contains("Repair broken save"));
+                    assert!(args.iter().any(|a| a == "resume"));
+                    ("completed", r#"[{\"title\":\"Repair broken save\",\"text\":\"Duplicate\"},{\"title\":\"Extend existing chapter\",\"text\":\"Extend the existing story format. Verify continuity.\"}]"#)
+                } else { ("completed", r#"[{\"title\":\"Repair broken save\",\"text\":\"Evidence: save loading fails on empty input. Fix loading and verify empty input is handled.\"},{\"title\":\"Repair broken save\",\"text\":\"Duplicate finding\"},{\"title\":\"Add levels using existing mechanics\",\"text\":\"Extend the current level format. Verify levels load with existing mechanics.\"}]"#) };
+            println!(r#"{{"type":"item.completed","item":{{"type":"agent_message","text":"{{\"outcome\":\"{outcome}\",\"message\":\"Research result\",\"tasks\":{tasks}}}"}}}}"#);
+        }
+        if title.contains("GEN_FAIL") { std::process::exit(1); }
+        if title.contains("GEN_LIMIT") {
+            println!(r#"{{"type":"turn.failed","error":{{"message":"Usage limit reached"}}}}"#);
+            std::process::exit(1);
+        }
+        println!(r#"{{"type":"turn.completed"}}"#);
+        return;
+    }
     if prompt.contains("You are a separate AI reviewer.") {
         let args: Vec<String> = std::env::args().collect();
         assert!(!args.iter().any(|a| a == "resume"));

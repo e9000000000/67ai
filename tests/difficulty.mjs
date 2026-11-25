@@ -6,7 +6,7 @@ const source = await readFile('web/app.js', 'utf8');
 const form = {};
 let submit, action, markup;
 const context = {
-  data: {projects:[{id:'p',name:'Project'}], settings:{hard_model:'hard-model',easy_model:'easy-model'}},
+  data: {projects:[{id:'p',name:'Project'}], settings:{hard_model:'hard-model',easy_model:'easy-model',gen_model:'gen-model'}},
   projectId:'p', escape:s=>s,
   $:selector=>selector.startsWith('button') ? {value:'easy'} : form,
   modal:(title, html)=>{markup=html;},
@@ -19,7 +19,7 @@ context.newTask('future');
 assert.match(markup, /value="hard"/);
 assert.match(markup, /value="easy"/);
 const fields = new Map([['title','Task'],['text','Instructions'],['project_id','p']]);
-for (const difficulty of ['hard','easy']) {
+for (const difficulty of ['hard','easy','gen']) {
   await submit(fields, {value:difficulty});
   assert.equal(action.model, `${difficulty}-model`);
   assert.equal(action.difficulty, difficulty);
@@ -49,6 +49,8 @@ runInNewContext(source.slice(source.indexOf('function settingsModel('), source.i
 context.settings();
 assert.match(markup, /Hard task model/);
 assert.match(markup, /Easy task model/);
+assert.match(markup, /Gen task model/);
+
 assert.doesNotMatch(markup, /default_model|Default model|Use default model/);
 assert.match(markup, /Use Codex configuration/);
 runInNewContext(source.slice(source.indexOf('function difficultyBadge('), source.indexOf('function modal(')), context);
@@ -80,3 +82,21 @@ await submit(new Map([['auto_approve_hard','on']]));
 assert.equal(action.auto_approve_easy,false);
 assert.equal(action.auto_approve_hard,true);
 console.log('Per-project AI approval form checks passed');
+
+assert.match(context.difficultyBadge({difficulty:'gen',model:'custom-model'}), />Gen</);
+assert.equal(context.difficultyBadge({model:'gen-model'}), '');
+runInNewContext(source.slice(source.indexOf('function genTask('), source.indexOf('function openTask(')), context);
+context.$ = selector=>selector.startsWith('button') ? {value:'gen'} : form;
+for (const kind of ['issues','content','features']) {
+  context.genTask(kind);
+  assert.match(markup, /Start Gen/);
+  assert.doesNotMatch(markup, /value="hard"/);
+  await submit(fields);
+  assert.equal(action.difficulty, 'gen');
+  assert.equal(action.model, 'gen-model');
+  assert.equal(action.status, 'todo');
+}
+context.projectId='';
+context.genTask('issues');
+assert.match(markup, /Select a project/);
+console.log('Gen preset and badge checks passed');

@@ -1,0 +1,22 @@
+{
+  "type": "object",
+  "properties": {
+    "outcome": {"type": "string", "enum": ["completed", "question", "blocked", "refused"]},
+    "message": {"type": "string", "description": "Research summary, findings, or question for the user."},
+    "tasks": {
+      "type": "array",
+      "description": "Actionable Future tasks. Empty for unfinished outcomes or when no suitable work is found.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "title": {"type": "string"},
+          "text": {"type": "string", "description": "Scope, evidence or rationale, relevant files/assets, and acceptance criteria."}
+        },
+        "required": ["title", "text"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["outcome", "message", "tasks"],
+  "additionalProperties": false
+}
