@@ -58,7 +58,7 @@ function difficultyBadge(t) {
   return ['easy', 'hard', 'gen'].includes(difficulty) ? `<span class="task-difficulty ${difficulty}">${{easy:'Easy',hard:'Hard',gen:'Gen'}[difficulty]}</span>` : '';
 }
 function card(t) {
-  return `<button class="task-card ${t.status==='now'?'running':''} ${needsAttention(t)?'needs-attention':''} ${t.awaiting_merge?'awaiting-merge':''}" data-task="${t.id}" draggable="${t.status!=='now'&&!t.awaiting_merge}"><h3>${escape(t.title)}</h3>${t.cleanup_at ? `<span class="approval-countdown" data-cleanup="${t.id}">${cleanupLabel(t)}</span>` : ''}<span class="card-meta">${difficultyBadge(t)}${!projectId ? '<span>'+escape(project(t.project_id)?.name)+'</span>' : ''}${t.review_pending ? '<span>AI review '+(t.status==='now'?'running':t.error?'interrupted':'queued')+'</span>' : ''}${t.awaiting_merge ? `<span>${t.merging?'Merging into main':t.error?'Merge needs attention':'Waiting to merge'}</span>` : ''}${needsAttention(t) ? `<span class="card-error">${escape(attentionLabel(t))}</span>` : ''}<span data-timer="${t.id}">${duration(elapsed(t))}</span></span></button>`;
+  return `<button class="task-card ${t.status==='now'?'running':''} ${needsAttention(t)?'needs-attention':''} ${t.awaiting_merge?'awaiting-merge':''}" data-task="${t.id}" draggable="${t.status!=='now'&&!t.awaiting_merge}"><h3>${escape(t.title)}</h3>${t.cleanup_at ? `<span class="approval-countdown" data-cleanup="${t.id}">${cleanupLabel(t)}</span>` : ''}<span class="card-meta">${difficultyBadge(t)}${!projectId ? '<span>'+escape(project(t.project_id)?.name)+'</span>' : ''}${t.blocker_id ? `<span>Blocker: ${escape(data.tasks?.find(b=>b.id===t.blocker_id)?.title || 'Missing task')}</span>` : ''}${t.review_pending ? '<span>AI review '+(t.status==='now'?'running':t.error?'interrupted':'queued')+'</span>' : ''}${t.awaiting_merge ? `<span>${t.merging?'Merging into main':t.error?'Merge needs attention':'Waiting to merge'}</span>` : ''}${needsAttention(t) ? `<span class="card-error">${escape(attentionLabel(t))}</span>` : ''}<span data-timer="${t.id}">${duration(elapsed(t))}</span></span></button>`;
 }
 function modal(title, body, wide = false, fullscreen = false) {
   const dialog = $('#dialog'); dialog.classList.toggle('wide', wide); dialog.classList.toggle('fullscreen', fullscreen);
@@ -135,9 +135,9 @@ function genTask(kind) {
 }
 function startContent() {
   if(!data.projects.length)return addProject();
-  modal('Plan more content', `<form id="modal-form"><p class="help">Start with a project. Gen inspects its content and suggests evidence-backed directions. Research creates no implementation cards.</p><label class="field"><span>Project</span><select name="project_id" required><option value="">Select a project</option>${data.projects.map(p=>`<option value="${p.id}" ${p.id===projectId?'selected':''}>${escape(p.name)}</option>`).join('')}</select></label><label class="field"><span>Goal (optional)</span><textarea id="content-goal" name="text" placeholder="I don't know"></textarea></label>${formEnd('Explore content')}`);
+  modal('Plan more content', `<form id="modal-form"><p class="help">Start with a project. Gen inspects its content and suggests evidence-backed directions. Research creates no implementation cards.</p><label class="field"><span>Project</span><select name="project_id" required><option value="">Select a project</option>${data.projects.map(p=>`<option value="${p.id}" ${p.id===projectId?'selected':''}>${escape(p.name)}</option>`).join('')}</select></label><label class="field"><span>Goal (optional)</span><textarea id="content-goal" name="text" placeholder="I don't know"></textarea></label><label class="field"><span>Blocker</span><select name="blocker_id" aria-label="Blocker task">${blockerOptions()}</select></label><p class="help">Waits for the blocker to complete. Approval is not required.</p>${formEnd('Explore content')}`);
   const attachments=attachFiles($('#content-goal'), true);
-  formSubmit(async f=>{await api({action:'create_task',project_id:f.get('project_id'),text:f.get('text'),title:'Gen more content',difficulty:'gen',content_planning:true,model:data.settings.gen_model||'',status:'todo',attachments:await attachments.upload()});});
+  formSubmit(async f=>{await api({action:'create_task',project_id:f.get('project_id'),text:f.get('text'),title:'Gen more content',difficulty:'gen',content_planning:true,blocker_id:f.get('blocker_id')||null,model:data.settings.gen_model||'',status:'todo',attachments:await attachments.upload()});});
 }
 function contentPlans() {
   const plans=(data.content_plans||[]).filter(p=>!projectId||p.project_id===projectId);
@@ -159,20 +159,40 @@ function editContent(key,index) {
 }
 function newTask(status = 'todo', preset = null) {
   if (!data.projects.length) { addProject(); toast('Add your first project folder, then create a task.'); return; }
-  modal(preset ? preset[0] : 'New task', `<form id="modal-form" class="new-task-form"><label class="field"><span>Title</span><input name="title" value="${escape(preset?.[0] || '')}" placeholder="What should the agent work on?" required autofocus maxlength="200"></label><div class="field instructions-field"><label for="task-instructions">Instructions</label><textarea id="task-instructions" name="text" placeholder="Describe the outcome, relevant details, and how to check the result..." required>${escape(preset?.[1] || '')}</textarea>${preset ? '<p class="help">Research only. Creates tasks in Future without implementing changes.</p>' : ''}</div><div class="new-task-footer"><label class="field"><span>Project</span><select name="project_id" required>${preset && !projectId ? '<option value="" selected disabled>Select a project</option>' : ''}${data.projects.map(p=>`<option value="${p.id}" ${p.id===projectId?'selected':''}>${escape(p.name)}</option>`).join('')}</select></label>${preset ? '<button type="submit" name="difficulty" value="gen" class="button primary">Start Gen</button>' : `<button type="submit" name="difficulty" value="hard" class="button primary">Hard</button><button type="submit" name="difficulty" value="easy" class="button primary" title="Create an easy task (Ctrl+Enter)">Easy</button><button type="submit" name="difficulty" value="gen" class="button primary" title="Research and create Future tasks without implementing changes">Gen</button>`}</div><p class="form-error" id="form-error" role="alert"></p></form>`, false, true);
+  modal(preset ? preset[0] : 'New task', `<form id="modal-form" class="new-task-form"><label class="field"><span>Title</span><input name="title" value="${escape(preset?.[0] || '')}" placeholder="What should the agent work on?" required autofocus maxlength="200"></label><div class="field instructions-field"><label for="task-instructions">Instructions</label><textarea id="task-instructions" name="text" placeholder="Describe the outcome, relevant details, and how to check the result..." required>${escape(preset?.[1] || '')}</textarea>${preset ? '<p class="help">Research only. Creates tasks in Future without implementing changes.</p>' : ''}</div><label class="field"><span>Blocker</span><select name="blocker_id" aria-label="Blocker task">${blockerOptions()}</select></label><p class="help">Waits for the blocker to complete. Approval is not required.</p><div class="new-task-footer"><label class="field"><span>Project</span><select name="project_id" required>${preset && !projectId ? '<option value="" selected disabled>Select a project</option>' : ''}${data.projects.map(p=>`<option value="${p.id}" ${p.id===projectId?'selected':''}>${escape(p.name)}</option>`).join('')}</select></label>${preset ? '<button type="submit" name="difficulty" value="gen" class="button primary">Start Gen</button>' : `<button type="submit" name="difficulty" value="hard" class="button primary">Hard</button><button type="submit" name="difficulty" value="easy" class="button primary" title="Create an easy task (Ctrl+Enter)">Easy</button><button type="submit" name="difficulty" value="gen" class="button primary" title="Research and create Future tasks without implementing changes">Gen</button>`}</div><p class="form-error" id="form-error" role="alert"></p></form>`, false, true);
   const attachments = attachFiles($('#task-instructions'));
   formSubmit(async (f, button) => { const difficulty = preset ? 'gen' : button?.value || 'easy'; const model = data.settings[`${difficulty}_model`] || ''; await api({action:'create_task',...Object.fromEntries(f),difficulty,model,status,attachments:await attachments.upload()}); });
   $('#modal-form').onkeydown=e=>{if(e.key==='Enter'&&(e.ctrlKey||e.metaKey)){e.preventDefault();e.currentTarget.requestSubmit($(preset ? 'button[value="gen"]' : 'button[value="easy"]', e.currentTarget));}};
+}
+function blockerOptions(current = null) {
+  const candidates = (data.tasks || []).filter(t => {
+    let next = t;
+    const seen = new Set();
+    while (next) {
+      if (next.id === current?.id || seen.has(next.id)) return false;
+      seen.add(next.id);
+      next = (data.tasks || []).find(t => t.id === next.blocker_id);
+    }
+    return true;
+  });
+  return '<option value="">None</option>' + candidates.map(t => `<option value="${t.id}" ${t.id===current?.blocker_id?'selected=""':''}>${escape(project(t.project_id)?.name || '')}: ${escape(t.title)}</option>`).join('');
+}
+function blockerStatus(t) {
+  if (!t.blocker_id) return '';
+  const b = task(t.blocker_id);
+  const completed = b && !b.awaiting_merge && !b.merging && (b.review_pending || (b.status==='done' && !b.attention && !b.error));
+  return `${completed ? 'Blocker completed' : 'Waiting for blocker'}: ${b?.title || 'Missing task'}`;
 }
 function openTask(key) {
   $('#task-panel').clearAttachments?.();
   selectedTask=key; lastMessages=''; const t=task(key); if(!t) return closeTask();
   $('#overlay').hidden=false; $('#task-panel').hidden=false;
   $('main').inert=true;
-  $('#task-panel').innerHTML=`<div class="panel-header"><h2 id="panel-title"></h2><span id="panel-difficulty"></span><details class="app-menu task-menu"><summary aria-label="Task menu" title="Task menu"><span class="burger"></span></summary><div class="menu-items"><label class="field mobile-task-state"><span>Move to</span><select id="task-state" aria-label="Task state">${states.map(status=>`<option value="${status}" ${status==='now'?'disabled':''}>${status[0].toUpperCase()+status.slice(1)}</option>`).join('')}</select></label><label class="field"><span>Model</span><select id="task-model" aria-label="Task model">${modelOptions(t.model)}</select></label><button id="task-agents">AGENTS.md</button><button id="edit-task">Edit title</button><button id="delete-task">Delete task</button><button id="stop-task" hidden>Stop</button></div></details><button id="approve-task" class="button primary small" title="Approve and clean up this task and its Codex session in 30 minutes. Project files stay." hidden>Approve</button><button id="ai-approve-task" class="button small" title="Review this result with the Hard model" hidden>AI approve</button><button id="revive-task" class="button small" title="Cancel cleanup" hidden>Revive</button><button id="close-task" class="icon-button" aria-label="Close task">×</button></div><div class="messages" id="messages"></div><form class="composer" id="message-form"><textarea id="message-input" placeholder="Add details or ask Codex to continue…" aria-label="Message to Codex" required></textarea></form>`;
+  $('#task-panel').innerHTML=`<div class="panel-header"><h2 id="panel-title"></h2><span id="panel-difficulty"></span><details class="app-menu task-menu"><summary aria-label="Task menu" title="Task menu"><span class="burger"></span></summary><div class="menu-items"><label class="field mobile-task-state"><span>Move to</span><select id="task-state" aria-label="Task state">${states.map(status=>`<option value="${status}" ${status==='now'?'disabled':''}>${status[0].toUpperCase()+status.slice(1)}</option>`).join('')}</select></label><label class="field"><span>Model</span><select id="task-model" aria-label="Task model">${modelOptions(t.model)}</select></label><label class="field"><span>Blocker</span><select id="task-blocker" aria-label="Blocker task"></select></label><button id="task-agents">AGENTS.md</button><button id="edit-task">Edit title</button><button id="delete-task">Delete task</button><button id="stop-task" hidden>Stop</button></div></details><button id="approve-task" class="button primary small" title="Approve and clean up this task and its Codex session in 30 minutes. Project files stay." hidden>Approve</button><button id="ai-approve-task" class="button small" title="Review this result with the Hard model" hidden>AI approve</button><button id="revive-task" class="button small" title="Cancel cleanup" hidden>Revive</button><button id="close-task" class="icon-button" aria-label="Close task">×</button></div><div id="task-blocker-status" class="merge-status" role="status" hidden></div><div class="messages" id="messages"></div><form class="composer" id="message-form"><textarea id="message-input" placeholder="Add details or ask Codex to continue…" aria-label="Message to Codex" required></textarea></form>`;
   $('#close-task').onclick=closeTask;
   $('#task-model').onchange=async e=>{await act({action:'edit_task',id:key,title:task(key).title,model:e.target.value});refreshPanel();};
   $('#task-state').onchange=async e=>{e.target.closest('details').open=false;await act({action:'move_task',id:key,status:e.target.value});refreshPanel();};
+  $('#task-blocker').onchange=async e=>{await act({action:'set_blocker',id:key,blocker_id:e.target.value || null});refreshPanel();};
   $('#task-agents').onclick=()=>openAgents(t.project_id);
   $('#edit-task').onclick=()=>{
     modal('Edit task',`<form id="modal-form"><label class="field"><span>Title</span><input name="title" value="${escape(task(key).title)}" required></label>${formEnd()}`);
@@ -205,6 +225,9 @@ function refreshPanel() {
   const t=task(selectedTask);if(!t)return closeTask();
   $('#panel-title').textContent=t.title;$('#panel-title').title=t.title;
   $('#panel-difficulty').innerHTML=difficultyBadge(t);
+  const options=blockerOptions(t);if($('#task-blocker').innerHTML!==options)$('#task-blocker').innerHTML=options;
+  $('#task-blocker').disabled=t.status==='now'||t.merging;
+  $('#task-blocker-status').textContent=blockerStatus(t);$('#task-blocker-status').hidden=!t.blocker_id;
   $('#task-model').disabled=t.status==='now'||t.merging;$('#task-model').value=t.model;
   $('#task-state').disabled=t.status==='now'||t.awaiting_merge;$('#task-state').value=t.status;
   $('#edit-task').disabled=t.status==='now'||t.merging;$('#delete-task').disabled=t.status==='now'||t.awaiting_merge;

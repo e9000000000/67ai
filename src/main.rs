@@ -71,6 +71,7 @@ struct Task {
     started_at: Option<u64>, thread_id: Option<String>, error: Option<String>,
     sent_count: usize, cancel: bool,
     #[serde(default)] content_planning: bool,
+    #[serde(default)] blocker_id: Option<String>,
     #[serde(default)] difficulty: Option<Difficulty>,
     #[serde(default)] cleanup_at: Option<u64>,
     #[serde(default)] attention: Option<String>,
@@ -82,6 +83,9 @@ struct Task {
 }
 impl Task {
     fn message(&mut self, role: &str, text: impl Into<String>) { self.messages.push(Message { role: role.into(), text: text.into(), at: now(), attachments: vec![] }); }
+    fn completed(&self) -> bool {
+        !self.awaiting_merge && !self.merging && (self.review_pending || (self.status == "done" && self.attention.is_none() && self.error.is_none()))
+    }
     fn is_gen(&self) -> bool { matches!(self.difficulty, Some(Difficulty::Gen)) }
 }
 #[derive(Clone, Serialize, Deserialize)]
@@ -190,7 +194,8 @@ enum Action {
     ProjectSettings { id: String, auto_approve_easy: bool, auto_approve_hard: bool },
     AiApproveTask { id: String },
     SelectContent { id: String, brief: ContentDirection },
-    CreateTask { #[serde(default)] content_planning: bool, project_id: String, title: String, text: String, model: String, status: String, #[serde(default)] difficulty: Option<Difficulty>, #[serde(default)] attachments: Vec<String> },
+    CreateTask { #[serde(default)] blocker_id: Option<String>, #[serde(default)] content_planning: bool, project_id: String, title: String, text: String, model: String, status: String, #[serde(default)] difficulty: Option<Difficulty>, #[serde(default)] attachments: Vec<String> },
+    SetBlocker { id: String, blocker_id: Option<String> },
     EditTask { id: String, title: String, model: String },
     MoveTask { id: String, status: String },
     SendMessage { id: String, text: String, #[serde(default)] attachments: Vec<String> },
@@ -209,6 +214,22 @@ fn nonempty(s: &str, name: &str) -> Result<(), (StatusCode, String)> {
 }
 fn task_mut<'a>(d: &'a mut Data, key: &str) -> Result<&'a mut Task, (StatusCode, String)> {
     d.tasks.iter_mut().find(|t| t.id == key).ok_or_else(|| bad("Task not found"))
+}
+fn validate_blocker(d: &Data, key: &str, blocker: Option<&str>) -> Result<(), (StatusCode, String)> {
+    let mut next = blocker;
+    for _ in 0..=d.tasks.len() {
+        let Some(id) = next else { return Ok(()); };
+        if id == key { return Err(bad("Tasks cannot block themselves or form a circular dependency")); }
+        let task = d.tasks.iter().find(|t| t.id == id).ok_or_else(|| bad("Blocker task not found"))?;
+        next = task.blocker_id.as_deref();
+    }
+    Err(bad("Circular blocker dependency"))
+}
+fn remove_task(d: &mut Data, key: &str) {
+    d.tasks.retain(|t| t.id != key);
+    for t in &mut d.tasks {
+        if t.blocker_id.as_deref() == Some(key) { t.blocker_id = None; }
+    }
 }
 fn idle(t: &Task) -> Result<(), (StatusCode, String)> {
     if t.merging { Err(bad("Wait for the merge to finish")) } else if t.status == "now" { Err(bad("Stop the running task first")) } else { Ok(()) }
@@ -270,14 +291,16 @@ async fn action(State(app): State<App>, Json(action): Json<Action>) -> ApiResult
             let project = Project { id: id(), name: name.trim().into(), path, auto_approve_easy: false, auto_approve_hard: false };
             result = json!({"id": project.id}); d.projects.push(project);
         }
-        Action::CreateTask { content_planning, project_id, title, text, model, status, difficulty, attachments } => {
+        Action::CreateTask { blocker_id, content_planning, project_id, title, text, model, status, difficulty, attachments } => {
             let attachments = load_attachments(&store, attachments)?;
             if content_planning && !matches!(difficulty, Some(Difficulty::Gen)) { return Err(bad("Content planning requires Gen")); }
             let text = if content_planning && text.trim().is_empty() { "I don't know. Inspect the project and suggest content directions.".into() } else { text };
             nonempty(&title, "Title")?; if attachments.is_empty() { nonempty(&text, "Task instructions")?; } valid_status(&status)?;
             if status == "done" { return Err(bad("New tasks must start in future or todo")); }
             if !d.projects.iter().any(|p| p.id == project_id) { return Err(bad("Project not found")); }
-            let mut task = Task { id: id(), project_id, title: title.trim().into(), model, status, difficulty, messages: vec![], created_at: now(), queued_at: now(), elapsed_ms: 0, started_at: None, thread_id: None, error: None, sent_count: 0, cancel: false, cleanup_at: None, attention: None, worktree: None, awaiting_merge: false, merging: false, review_pending: false, review_attempted: false, content_planning };
+            let blocker_id = blocker_id.filter(|id| !id.is_empty());
+            validate_blocker(&d, "", blocker_id.as_deref())?;
+            let mut task = Task { blocker_id, id: id(), project_id, title: title.trim().into(), model, status, difficulty, messages: vec![], created_at: now(), queued_at: now(), elapsed_ms: 0, started_at: None, thread_id: None, error: None, sent_count: 0, cancel: false, cleanup_at: None, attention: None, worktree: None, awaiting_merge: false, merging: false, review_pending: false, review_attempted: false, content_planning };
             task.message("user", text.trim()); task.messages.last_mut().unwrap().attachments = attachments;
             result = json!({"id": task.id}); d.tasks.push(task);
         }
@@ -288,11 +311,17 @@ async fn action(State(app): State<App>, Json(action): Json<Action>) -> ApiResult
             let plan = d.content_plans[index].clone();
             let context = format!("Content brief {}\n{}\nEvidence: {}", plan.id, serde_json::to_string_pretty(&brief).map_err(bad)?, json!({"inventory":plan.research.inventory,"unknowns":plan.research.unknowns}));
             for proposal in &brief.tasks {
-                let mut t = Task { id: id(), project_id: plan.project_id.clone(), title: proposal.title.trim().into(), model: d.settings.hard_model.clone(), status: "future".into(), difficulty: Some(Difficulty::Hard), content_planning: false, messages: vec![], created_at: now(), queued_at: now(), elapsed_ms: 0, started_at: None, thread_id: None, error: None, sent_count: 0, cancel: false, cleanup_at: None, attention: None, worktree: None, awaiting_merge: false, merging: false, review_pending: false, review_attempted: false };
+                let mut t = Task { blocker_id: None, id: id(), project_id: plan.project_id.clone(), title: proposal.title.trim().into(), model: d.settings.hard_model.clone(), status: "future".into(), difficulty: Some(Difficulty::Hard), content_planning: false, messages: vec![], created_at: now(), queued_at: now(), elapsed_ms: 0, started_at: None, thread_id: None, error: None, sent_count: 0, cancel: false, cleanup_at: None, attention: None, worktree: None, awaiting_merge: false, merging: false, review_pending: false, review_attempted: false };
                 t.message("user", format!("{}\n\nImplement only this card. The shared brief below provides context and constraints for the batch.\n{}", proposal.text, context));
                 d.tasks.push(t);
             }
             d.content_plans[index].brief = Some(brief);
+        }
+        Action::SetBlocker { id, blocker_id } => {
+            let blocker_id = blocker_id.filter(|id| !id.is_empty());
+            validate_blocker(&d, &id, blocker_id.as_deref())?;
+            let t = task_mut(&mut d, &id)?; idle(t)?;
+            t.blocker_id = blocker_id;
         }
         Action::EditTask { id, title, model } => {
             nonempty(&title, "Title")?; let t = task_mut(&mut d, &id)?; idle(t)?;
@@ -327,7 +356,9 @@ async fn action(State(app): State<App>, Json(action): Json<Action>) -> ApiResult
             let t = task_mut(&mut d, &id)?;
             if t.status != "now" { return Err(bad("Task is not running")); } t.cancel = true;
         }
-        Action::DeleteTask { id } => { let t = task_mut(&mut d, &id)?; idle(t)?; if t.awaiting_merge { return Err(bad("Merge this task before deleting it")); } d.tasks.retain(|t| t.id != id); }
+        Action::DeleteTask { id } => { let t = task_mut(&mut d, &id)?; idle(t)?; if t.awaiting_merge { return Err(bad("Merge this task before deleting it")); }
+            if !t.completed() && d.tasks.iter().any(|t| t.blocker_id.as_deref() == Some(&id)) { return Err(bad("Remove this task as a blocker before deleting it")); }
+            remove_task(&mut d, &id); }
         Action::ApproveTask { id } => {
             let t = task_mut(&mut d, &id)?;
             if t.status != "done" { return Err(bad("Only done tasks can be approved")); }
@@ -677,6 +708,7 @@ fn next_task(d: &Data) -> Option<usize> {
     let limit = if d.settings.parallelism { d.settings.max_workers } else { 1 };
     if d.settings.paused || d.codex_paused_until > now() || d.tasks.iter().filter(|t| t.status == "now").count() >= limit { return None; }
     d.tasks.iter().enumerate().filter(|(_, t)| t.status == "todo" && t.error.is_none()
+        && t.blocker_id.as_ref().is_none_or(|id| d.tasks.iter().any(|b| &b.id == id && b.completed()))
         && !d.tasks.iter().any(|other| other.project_id == t.project_id
             && (((other.merging || (other.awaiting_merge && !d.settings.parallelism)) && t.worktree.is_none())
                 || (other.status == "now" && (!d.settings.parallelism || other.worktree.is_none() || t.is_gen())))))
@@ -859,7 +891,7 @@ fn save_proposals(d: &mut Data, source: &Task, reply: GenReply) {
             skipped += 1;
             continue;
         }
-        let mut task = Task { id: id(), project_id: source.project_id.clone(), title: title.into(), model: d.settings.hard_model.clone(), status: "future".into(), difficulty: Some(Difficulty::Hard), messages: vec![], created_at: now(), queued_at: now(), elapsed_ms: 0, started_at: None, thread_id: None, error: None, sent_count: 0, cancel: false, cleanup_at: None, attention: None, worktree: None, awaiting_merge: false, merging: false, review_pending: false, review_attempted: false, content_planning: false };
+        let mut task = Task { blocker_id: None, id: id(), project_id: source.project_id.clone(), title: title.into(), model: d.settings.hard_model.clone(), status: "future".into(), difficulty: Some(Difficulty::Hard), messages: vec![], created_at: now(), queued_at: now(), elapsed_ms: 0, started_at: None, thread_id: None, error: None, sent_count: 0, cancel: false, cleanup_at: None, attention: None, worktree: None, awaiting_merge: false, merging: false, review_pending: false, review_attempted: false, content_planning: false };
         task.message("user", proposal.text.trim());
         task.message("system", format!("Generated by Gen task: {} ({})", source.title, source.id));
         created.push(format!("- {} ({})", task.title, task.id));
@@ -1022,7 +1054,7 @@ async fn cleanup_approved(app: &App) {
             t.cleanup_at = None;
             t.error = Some(format!("Cleanup failed; task kept. Approve to retry: {e}"));
         } else {
-            d.tasks.retain(|t| t.id != task.id);
+            remove_task(&mut d, &task.id);
         }
         if let Err(e) = store.commit(d) { eprintln!("Cannot persist cleanup: {e}"); break; }
         if store.data.tasks.iter().any(|t| t.id == task.id) { continue; }
@@ -1115,6 +1147,74 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn blockers_gate_queue_until_completion_without_approval() {
+        for parallelism in [false, true] {
+            let mut d = initial_data();
+            d.settings.parallelism = parallelism;
+            let blocker = task("future", 10);
+            let mut dependent = task("todo", 0);
+            dependent.blocker_id = Some(blocker.id.clone());
+            d.tasks = vec![dependent, blocker, task("todo", 5)];
+            d.tasks[2].project_id = "other".into();
+            assert_eq!(next_task(&d), Some(2));
+            d.tasks[1].status = "done".into();
+            for attention in ["failed", "question", "blocked", "refused", "unconfirmed"] {
+                d.tasks[1].attention = Some(attention.into());
+                assert_eq!(next_task(&d), Some(2));
+            }
+            d.tasks[1].attention = None;
+            d.tasks[1].awaiting_merge = true;
+            assert_eq!(next_task(&d), Some(2));
+            d.tasks[1].awaiting_merge = false;
+            assert_eq!(d.tasks[1].cleanup_at, None);
+            assert_eq!(next_task(&d), Some(0));
+            queue_review(&mut d.tasks[1]).unwrap();
+            assert_eq!(next_task(&d), Some(0));
+            d.tasks[1].status = "now".into();
+            d.tasks[1].attention = Some("unconfirmed".into());
+            assert!(d.tasks[1].completed());
+            d.tasks[1].status = "todo".into();
+            d.tasks[1].review_pending = false;
+            assert_eq!(next_task(&d), Some(2));
+            d.tasks[1].status = "done".into(); d.tasks[1].attention = None;
+            let key = d.tasks[1].id.clone();
+            remove_task(&mut d, &key);
+            assert!(d.tasks[0].blocker_id.is_none());
+            assert_eq!(next_task(&d), Some(0));
+        }
+    }
+
+    #[tokio::test]
+    async fn blocker_actions_persist_validate_and_protect_dependencies() {
+        let dir = std::env::current_dir().unwrap().join("tmp").join(format!("blockers-{}", id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut d = initial_data();
+        d.projects.push(Project { id: "p".into(), name: "Test".into(), path: dir.to_string_lossy().into(), auto_approve_easy: false, auto_approve_hard: false });
+        let blocker = task("future", 0); let key = blocker.id.clone(); d.tasks.push(blocker);
+        let app = Arc::new(Mutex::new(Store { data: d, file: dir.join("67ai.json") }));
+        let Json(created) = action(State(app.clone()), Json(serde_json::from_value(json!({"action":"create_task", "project_id":"p", "title":"Dependent", "text":"Work", "model":"", "status":"todo", "blocker_id":key})).unwrap())).await.unwrap();
+        let dependent = created["id"].as_str().unwrap().to_string();
+        {
+            let store = app.lock().await;
+            let saved: Data = serde_json::from_slice(&std::fs::read(&store.file).unwrap()).unwrap();
+            assert_eq!(saved.tasks[1].blocker_id.as_deref(), Some(key.as_str()));
+            assert_eq!(next_task(&saved), None);
+        }
+        for blocker_id in [Some(dependent.clone()), Some("missing".into())] {
+            assert!(action(State(app.clone()), Json(Action::SetBlocker { id: dependent.clone(), blocker_id })).await.is_err());
+        }
+        assert!(action(State(app.clone()), Json(Action::SetBlocker { id: key.clone(), blocker_id: Some(dependent.clone()) })).await.is_err());
+        assert!(action(State(app.clone()), Json(Action::DeleteTask { id: key.clone() })).await.is_err());
+        let _ = action(State(app.clone()), Json(Action::SetBlocker { id: dependent.clone(), blocker_id: None })).await.unwrap();
+        assert_eq!(next_task(&app.lock().await.data), Some(1));
+        let _ = action(State(app.clone()), Json(Action::SetBlocker { id: dependent.clone(), blocker_id: Some(key.clone()) })).await.unwrap();
+        let _ = action(State(app.clone()), Json(Action::MoveTask { id: key.clone(), status: "done".into() })).await.unwrap();
+        let _ = action(State(app.clone()), Json(Action::DeleteTask { id: key })).await.unwrap();
+        assert!(app.lock().await.data.tasks[0].blocker_id.is_none());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn codex_limits_pause_queue_and_preserve_manual_pause() {
         let mut d = initial_data();
@@ -1329,7 +1429,7 @@ mod tests {
         let app = Arc::new(Mutex::new(Store { data, file: dir.join("67ai.json") }));
         let Json(uploaded) = upload(State(app.clone()), axum::extract::Query(Upload { name: "notes.txt".into(), media_type: "text/plain".into() }), axum::body::Bytes::from_static(b"file contents")).await.unwrap();
         let key = uploaded["id"].as_str().unwrap().to_string();
-        let Json(created) = action(State(app.clone()), Json(Action::CreateTask { content_planning: false, project_id: "p".into(), title: "Files".into(), text: "".into(), model: "".into(), status: "future".into(), difficulty: None, attachments: vec![key.clone()] })).await.unwrap();
+        let Json(created) = action(State(app.clone()), Json(Action::CreateTask { blocker_id: None, content_planning: false, project_id: "p".into(), title: "Files".into(), text: "".into(), model: "".into(), status: "future".into(), difficulty: None, attachments: vec![key.clone()] })).await.unwrap();
         let task_id = created["id"].as_str().unwrap().to_string();
         let _ = action(State(app.clone()), Json(Action::SendMessage { id: task_id.clone(), text: "".into(), attachments: vec![key.clone()] })).await.unwrap();
         assert!(action(State(app.clone()), Json(Action::SendMessage { id: task_id.clone(), text: "".into(), attachments: vec![] })).await.is_err());
@@ -1345,7 +1445,7 @@ mod tests {
         assert!(old.attachments.is_empty());
     }
     fn task(status: &str, queued_at: u64) -> Task {
-        Task { id: id(), project_id: "p".into(), title: "Test".into(), model: "".into(), status: status.into(), difficulty: None, messages: vec![], created_at: 0, queued_at, elapsed_ms: 0, started_at: None, thread_id: None, error: None, sent_count: 0, cancel: false, cleanup_at: None, attention: None, worktree: None, awaiting_merge: false, merging: false, review_pending: false, review_attempted: false, content_planning: false }
+        Task { blocker_id: None, id: id(), project_id: "p".into(), title: "Test".into(), model: "".into(), status: status.into(), difficulty: None, messages: vec![], created_at: 0, queued_at, elapsed_ms: 0, started_at: None, thread_id: None, error: None, sent_count: 0, cancel: false, cleanup_at: None, attention: None, worktree: None, awaiting_merge: false, merging: false, review_pending: false, review_attempted: false, content_planning: false }
     }
     #[test]
     fn queue_is_fifo_and_sequential_by_default() {
