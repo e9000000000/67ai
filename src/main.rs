@@ -4,6 +4,7 @@
 mod tray;
 
 mod content;
+mod notification;
 use content::*;
 
 use axum::{Json, Router, extract::{Path, State}, http::{HeaderMap, StatusCode}, response::{Html, IntoResponse}, routing::{get, post}};
@@ -15,6 +16,7 @@ use tokio::{io::{AsyncBufReadExt, AsyncWriteExt, BufReader}, process::Command, s
 type App = Arc<Mutex<Store>>;
 // Worktree setup, recovery, and merging must not edit main concurrently.
 static MAIN_GIT: Mutex<()> = Mutex::const_new(());
+static NOTIFICATION: Mutex<notification::Notification> = Mutex::const_new(notification::Notification::new(false));
 const LIMIT_PAUSED: &str = "Codex limit reached. Work is queued and will resume automatically after the limit resets.";
 const DIRTY_MAIN: &str = "Commit or stash changes in the main worktree before starting or merging parallel tasks.";
 type ApiResult = Result<Json<Value>, (StatusCode, String)>;
@@ -198,6 +200,11 @@ async fn state(State(app): State<App>) -> Json<Value> {
     Json(json!({"data": store.data, "models": models(), "data_file": store.file, "server_time": now()}))
 }
 
+async fn presence(Json(presence): Json<notification::Presence>) -> StatusCode {
+    NOTIFICATION.lock().await.presence(presence, now());
+    StatusCode::NO_CONTENT
+}
+
 #[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 enum Action {
@@ -287,14 +294,14 @@ fn waiting_for_approval(d: &Data) -> usize {
 
 #[cfg(windows)]
 async fn notification_worker(app: App, tray: tray::Tray, mut shutdown: watch::Receiver<bool>) {
-    let mut ready = waiting_for_approval(&app.lock().await.data) > 0;
+    *NOTIFICATION.lock().await = notification::Notification::new(waiting_for_approval(&app.lock().await.data) > 0);
     loop {
         tokio::select! {
             _ = shutdown.changed() => break,
             _ = tokio::time::sleep(std::time::Duration::from_millis(400)) => {
-                let count = waiting_for_approval(&app.lock().await.data);
-                if count > 0 && !ready { tray.notify_ready(count); }
-                ready = count > 0;
+                let store = app.lock().await;
+                let count = waiting_for_approval(&store.data);
+                if NOTIFICATION.lock().await.poll(count > 0, store.data.saved_at, now()) { tray.notify_ready(count); }
             }
         }
     }
@@ -1247,6 +1254,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/vendor/highlight.min.js", get(|| async { ([("content-type", "text/javascript")], include_str!("../web/vendor/highlight.min.js")) }))
         .route("/style.css", get(|| async { ([("content-type", "text/css")], include_str!("../web/style.css")) }))
         .route("/api/state", get(state)).route("/api/action", post(action)).route("/api/agents/{id}", get(agents))
+        .route("/api/presence", post(presence))
         .route("/api/rate-limits", get(rate_limits))
         .route("/api/attachments", post(upload).layer(axum::extract::DefaultBodyLimit::max(25 * 1024 * 1024)))
         .route("/api/attachments/{id}", get(attachment))
