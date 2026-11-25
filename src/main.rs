@@ -16,7 +16,7 @@ use tokio::{io::{AsyncBufReadExt, AsyncWriteExt, BufReader}, process::Command, s
 type App = Arc<Mutex<Store>>;
 // Worktree setup, recovery, and merging must not edit main concurrently.
 static MAIN_GIT: Mutex<()> = Mutex::const_new(());
-static NOTIFICATION: Mutex<notification::Notification> = Mutex::const_new(notification::Notification::new(false));
+static NOTIFICATION: Mutex<notification::Notification> = Mutex::const_new(notification::Notification::new(Vec::new()));
 const LIMIT_PAUSED: &str = "Codex limit reached. Work is queued and will resume automatically after the limit resets.";
 const DIRTY_MAIN: &str = "Commit or stash changes in the main worktree before starting or merging parallel tasks.";
 type ApiResult = Result<Json<Value>, (StatusCode, String)>;
@@ -291,16 +291,28 @@ fn finished_tasks(d: &Data) -> usize {
     count
 }
 
+#[cfg(any(windows, test))]
+fn notification_signals(d: &Data) -> Vec<String> {
+    let mut signals = Vec::new();
+    if finished_tasks(d) > 0 { signals.push("finished".into()); }
+    for t in &d.tasks {
+        if t.status == "done" && !t.merging && (t.attention.is_some() || t.error.is_some()) {
+            signals.push(format!("{}:{}", t.id, t.messages.len()));
+        }
+    }
+    signals
+}
+
 #[cfg(windows)]
 async fn notification_worker(app: App, tray: tray::Tray, mut shutdown: watch::Receiver<bool>) {
-    *NOTIFICATION.lock().await = notification::Notification::new(finished_tasks(&app.lock().await.data) > 0);
+    *NOTIFICATION.lock().await = notification::Notification::new(notification_signals(&app.lock().await.data));
     loop {
         tokio::select! {
             _ = shutdown.changed() => break,
             _ = tokio::time::sleep(std::time::Duration::from_millis(400)) => {
                 let store = app.lock().await;
-                let count = finished_tasks(&store.data);
-                if NOTIFICATION.lock().await.poll(count > 0, store.data.saved_at, now()) { tray.notify_ready(); }
+                let signals = notification_signals(&store.data);
+                if NOTIFICATION.lock().await.poll(signals, store.data.saved_at, now()) { tray.notify_ready(); }
             }
         }
     }
@@ -1338,6 +1350,37 @@ mod tests {
         let _ = action(State(app.clone()), Json(Action::DeleteTask { id: key })).await.unwrap();
         assert!(app.lock().await.data.tasks[0].blocker_id.is_none());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn attention_notifications_do_not_wait_for_other_tasks() {
+        let mut d = initial_data();
+        d.tasks = vec![task("now", 0), task("done", 0)];
+        for attention in ["question", "blocked", "refused", "failed", "unconfirmed"] {
+            d.tasks[1].attention = Some(attention.into());
+            assert_eq!(notification_signals(&d).len(), 1, "{attention}");
+        }
+        let previous = notification_signals(&d);
+        d.tasks[1].message("assistant", "Another question");
+        assert_ne!(notification_signals(&d), previous);
+        d.tasks[1].attention = None;
+        assert!(notification_signals(&d).is_empty());
+        d.tasks[1].error = Some("Failed".into());
+        for field in ["review_pending", "awaiting_merge", "cleanup_at"] {
+            let mut value = serde_json::to_value(&d).unwrap();
+            value["tasks"][1][field] = if field == "cleanup_at" { json!(1) } else { json!(true) };
+            assert_eq!(notification_signals(&serde_json::from_value(value).unwrap()).len(), 1, "{field}");
+        }
+        d.tasks[1].merging = true;
+        assert!(notification_signals(&d).is_empty());
+        d.tasks[1].merging = false;
+        for status in ["future", "todo", "now"] {
+            d.tasks[1].status = status.into();
+            assert!(notification_signals(&d).is_empty(), "{status}");
+        }
+        d.tasks[0].status = "done".into();
+        d.tasks[1].status = "future".into();
+        assert_eq!(notification_signals(&d), vec!["finished"]);
     }
 
     #[test]
