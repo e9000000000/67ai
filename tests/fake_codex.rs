@@ -23,12 +23,20 @@ fn main() {
                     continue;
                 }
                 println!(r#"{{"id":2,"result":{{"rateLimits":{{"primary":{{"usedPercent":15,"windowDurationMins":300,"resetsAt":1900000000}},"secondary":{{"usedPercent":37,"windowDurationMins":10080,"resetsAt":1900500000}}}}}}}}"#);
+            } else if line.contains("thread/list") {
+                let dir = std::path::PathBuf::from(std::env::var("67AI_DATA_DIR").unwrap());
+                let file = if line.contains("\"archived\":true") { "archived-sessions.json" }
+                    else if line.contains("\"cursor\":\"page2\"") { "sessions-page2.json" } else { "sessions.json" };
+                let result = std::fs::read_to_string(dir.join(file)).unwrap_or_else(|_| "{\"data\":[],\"nextCursor\":null}".into());
+                println!("{{\"id\":2,\"result\":{result}}}");
             } else if line.contains("thread/delete") {
                 if line.contains("fail-delete") {
                     println!(r#"{{"id":2,"error":{{"message":"Deletion failed"}}}}"#);
                 } else {
                     let dir = std::env::var("67AI_DATA_DIR").unwrap();
-                    std::fs::write(std::path::Path::new(&dir).join("deleted-session.json"), line).unwrap();
+                    std::fs::write(std::path::Path::new(&dir).join("deleted-session.json"), &line).unwrap();
+                    let mut log = std::fs::OpenOptions::new().create(true).append(true).open(std::path::Path::new(&dir).join("deleted-sessions.jsonl")).unwrap();
+                    writeln!(log, "{line}").unwrap();
                     println!(r#"{{"id":2,"result":{{}}}}"#);
                 }
             }

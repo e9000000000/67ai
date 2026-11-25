@@ -174,6 +174,11 @@ function addProject() {
   modal('Add a project', `<form id="modal-form"><p class="help">A project is an existing folder on your computer. Codex works directly in that folder.</p><label class="field"><span>Project name</span><input name="name" placeholder="My project" required autofocus></label><label class="field"><span>Folder path</span><input name="path" placeholder="C:\\Users\\you\\Projects\\my-project" required></label>${formEnd('Add project')}`);
   formSubmit(async f => { const result = await api({action:'add_project',name:f.get('name'),path:f.get('path')}); projectId=result.id;renderBoard();toast('Project added'); });
 }
+function clearProject() {
+  if (!data.projects.length) return;
+  modal('Clear unused sessions and worktrees', `<form id="modal-form"><label class="field"><span>Project</span><select name="id" required><option value="">Select a project</option>${data.projects.map(p=>`<option value="${p.id}" ${p.id===projectId?'selected':''}>${escape(p.name)}</option>`).join('')}</select></label><p class="help">Delete Codex sessions and worktrees that are not assigned to existing tasks. Uncommitted files in unused worktrees will be deleted.</p>${formEnd('Clear unused')}`);
+  formSubmit(async f => { const result = await api({action:'clear_project',id:f.get('id')}); toast(`Deleted ${result.sessions} session(s) and ${result.worktrees} worktree(s)`); });
+}
 function genTask(kind) {
   if (kind === 'content') return contentPlans();
   const presets = {
@@ -244,7 +249,7 @@ function openTask(key) {
   selectedTask=key; lastMessages=''; const t=task(key); if(!t) return closeTask();
   $('#overlay').hidden=false; $('#task-panel').hidden=false;
   $('main').inert=true;
-  $('#task-panel').innerHTML=`<div class="panel-header"><h2 id="panel-title"></h2><span id="panel-difficulty"></span><details class="app-menu task-menu"><summary aria-label="Task menu" title="Task menu"><span class="burger"></span></summary><div class="menu-items"><label class="field mobile-task-state"><span>Move to</span><select id="task-state" aria-label="Task state">${states.map(status=>`<option value="${status}" ${status==='now'?'disabled':''}>${status[0].toUpperCase()+status.slice(1)}</option>`).join('')}</select></label><label class="field"><span>Model</span><select id="task-model" aria-label="Task model">${modelOptions(t.model)}</select></label><label class="field"><span>Blocker</span><select id="task-blocker" aria-label="Blocker task"></select></label><button id="task-agents">AGENTS.md</button><button id="edit-task">Edit title</button><button id="delete-task">Delete task</button><button id="stop-task" hidden>Stop</button></div></details><button id="approve-task" class="button primary small" title="Approve and clean up this task and its Codex session in 30 minutes. Project files stay." hidden>Approve</button><button id="ai-approve-task" class="button small" title="Review this result with the Hard model" hidden>AI approve</button><button id="revive-task" class="button small" title="Cancel cleanup" hidden>Revive</button><button id="close-task" class="icon-button" aria-label="Close task">×</button></div><div id="task-blocker-status" class="merge-status" role="status" hidden></div><div class="messages" id="messages"></div><form class="composer" id="message-form"><textarea id="message-input" placeholder="Add details or ask Codex to continue…" aria-label="Message to Codex" required></textarea></form>`;
+  $('#task-panel').innerHTML=`<div class="panel-header"><h2 id="panel-title"></h2><span id="panel-difficulty"></span><details class="app-menu task-menu"><summary aria-label="Task menu" title="Task menu"><span class="burger"></span></summary><div class="menu-items"><label class="field mobile-task-state"><span>Move to</span><select id="task-state" aria-label="Task state">${states.map(status=>`<option value="${status}" ${status==='now'?'disabled':''}>${status[0].toUpperCase()+status.slice(1)}</option>`).join('')}</select></label><label class="field"><span>Model</span><select id="task-model" aria-label="Task model">${modelOptions(t.model)}</select></label><label class="field"><span>Blocker</span><select id="task-blocker" aria-label="Blocker task"></select></label><button id="task-agents">AGENTS.md</button><button id="edit-task">Edit title</button><button id="delete-task">Delete task</button><button id="stop-task" hidden>Stop</button></div></details><button id="approve-task" class="button primary small" title="Approve and delete this task, its Codex sessions, and task worktree in 30 minutes." hidden>Approve</button><button id="ai-approve-task" class="button small" title="Review this result with the Hard model" hidden>AI approve</button><button id="revive-task" class="button small" title="Cancel cleanup" hidden>Revive</button><button id="close-task" class="icon-button" aria-label="Close task">×</button></div><div id="task-blocker-status" class="merge-status" role="status" hidden></div><div class="messages" id="messages"></div><form class="composer" id="message-form"><textarea id="message-input" placeholder="Add details or ask Codex to continue…" aria-label="Message to Codex" required></textarea></form>`;
   if (t.content_plan_id) {
     $('#messages').insertAdjacentHTML('beforebegin', '<button id="task-content-plan" class="button small">Content plan &amp; sample feedback</button>');
     $('#task-content-plan').onclick=()=>{closeTask();openContentPlan(t.content_plan_id);};
@@ -259,7 +264,7 @@ function openTask(key) {
     formSubmit(f=>api({action:'edit_task',id:key,title:f.get('title'),model:task(key).model}));
   };
   $('#delete-task').onclick=()=>{
-    modal('Delete this task?',`<form id="modal-form"><p class="help">This removes “${escape(task(key).title)}” and its board conversation. Project files and Codex session files are kept.</p>${formEnd('Delete task')}`);
+    modal('Delete this task?',`<form id="modal-form"><p class="help">This removes “${escape(task(key).title)}” and its Codex sessions, task worktree, and branch. Uncommitted worktree files will be deleted.</p>${formEnd('Delete task')}`);
     formSubmit(async()=>{await api({action:'delete_task',id:key});closeTask();});
   };
   $('#approve-task').onclick=async()=>{
@@ -372,6 +377,7 @@ function settings(){
 $('#project-tabs').onclick=e=>{const tab=e.target.closest('[data-project]');if(tab){projectId=tab.dataset.project;renderBoard();}};
 $('#add-project-tab').onclick=()=>{if(data)addProject();};
 $('#add-project-button').onclick=()=>{if(data)addProject();};
+$('#clear-project-button').onclick=()=>{if(data)clearProject();};
 $('#shell-button').onclick=()=>{if(data)shellInspection();};
 $('#new-task-button').onclick=()=>{if(data)newTask();};
 document.querySelectorAll('[data-gen]').forEach(button=>{button.onclick=()=>{if(data)genTask(button.dataset.gen);};});

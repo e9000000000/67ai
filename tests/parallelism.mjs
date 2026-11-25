@@ -135,6 +135,7 @@ try {
   const merged=d.tasks.find(t=>t.id===conflict);
   assert.equal(merged.error,null);
   assert.equal(merged.thread_id,'parallel-test');
+  assert(merged.session_ids.includes('parallel-test'));assert(merged.session_ids.includes('merge-repair'));
   assert.equal(merged.attention,null);
   assert(merged.messages.some(m=>m.text.includes('Resolving merge conflicts automatically')));
   assert.equal(await readFile(path.join(repo,'base.txt'),'utf8'),'main edit\ntask edit\n');

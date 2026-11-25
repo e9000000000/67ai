@@ -7,6 +7,7 @@ mod tray;
 mod shells;
 
 mod content;
+mod cleanup;
 mod notification;
 use content::*;
 
@@ -89,6 +90,7 @@ struct Task {
     #[serde(default)] content_planning: bool,
     #[serde(default)] blocker_id: Option<String>,
     #[serde(default)] difficulty: Option<Difficulty>,
+    #[serde(default)] session_ids: Vec<String>,
     #[serde(default)] cleanup_at: Option<u64>,
     #[serde(default)] attention: Option<String>,
     #[serde(default)] execution_mode: ExecutionMode,
@@ -227,6 +229,7 @@ enum Action {
     ExpandContent { id: String },
     AddProject { name: String, path: String },
     ProjectSettings { id: String, auto_approve_easy: bool, auto_approve_hard: bool },
+    ClearProject { id: String },
     AiApproveTask { id: String },
     SelectContent { id: String, brief: ContentDirection },
     CreateTask { #[serde(default)] execution_mode: ExecutionMode, #[serde(default)] blocker_id: Option<String>, #[serde(default)] content_planning: bool, project_id: String, title: String, text: String, model: String, status: String, #[serde(default)] difficulty: Option<Difficulty>, #[serde(default)] attachments: Vec<String> },
@@ -355,6 +358,7 @@ async fn action(State(app): State<App>, Json(action): Json<Action>) -> ApiResult
     let mut d = store.data.clone();
     let mut result = json!({"ok": true});
     match action {
+        Action::ClearProject { id } => { result = cleanup::clear_project(&store, &id).await.map_err(bad)?; }
         Action::SaveContentBrief { project_id, brief, id } => { result = save_brief(&mut d, project_id, brief, id.as_deref())?; }
         Action::MakeSample { id } => { result = make_sample(&mut d, &id)?; }
         Action::SampleDecision { id, decision, feedback } => { decide_sample(&mut d, &id, &decision, &feedback)?; }
@@ -383,7 +387,7 @@ async fn action(State(app): State<App>, Json(action): Json<Action>) -> ApiResult
             if !d.projects.iter().any(|p| p.id == project_id) { return Err(bad("Project not found")); }
             let blocker_id = blocker_id.filter(|id| !id.is_empty());
             validate_blocker(&d, "", &project_id, blocker_id.as_deref())?;
-            let mut task = Task { execution_mode, blocker_id, id: id(), project_id, title: title.trim().into(), model, status, difficulty, messages: vec![], created_at: now(), queued_at: now(), elapsed_ms: 0, started_at: None, thread_id: None, error: None, sent_count: 0, cancel: false, cleanup_at: None, attention: None, worktree: None, awaiting_merge: false, merging: false, review_pending: false, review_attempted: false, content_planning, content_plan_id: None, content_revision: 0, implementation_completed: false };
+            let mut task = Task { execution_mode, blocker_id, id: id(), project_id, title: title.trim().into(), model, status, difficulty, messages: vec![], created_at: now(), queued_at: now(), elapsed_ms: 0, started_at: None, thread_id: None, session_ids: vec![], error: None, sent_count: 0, cancel: false, cleanup_at: None, attention: None, worktree: None, awaiting_merge: false, merging: false, review_pending: false, review_attempted: false, content_planning, content_plan_id: None, content_revision: 0, implementation_completed: false };
             task.message("user", text.trim()); task.messages.last_mut().unwrap().attachments = attachments;
             result = json!({"id": task.id}); d.tasks.push(task);
         }
@@ -437,6 +441,7 @@ async fn action(State(app): State<App>, Json(action): Json<Action>) -> ApiResult
         }
         Action::DeleteTask { id } => { let t = task_mut(&mut d, &id)?; idle(t)?; if t.awaiting_merge { return Err(bad("Merge this task before deleting it")); }
             if !t.completed() && d.tasks.iter().any(|t| t.blocker_id.as_deref() == Some(&id)) { return Err(bad("Remove this task as a blocker before deleting it")); }
+            cleanup::task_resources(&store, d.tasks.iter().find(|t| t.id == id).unwrap()).await.map_err(bad)?;
             remove_task(&mut d, &id); }
         Action::ApproveTask { id } => {
             let t = task_mut(&mut d, &id)?;
@@ -721,6 +726,11 @@ async fn run_codex_inner(app: &App, task: &Task, project: &Project, settings: &S
                         limited = true;
                     }
                     update_task(app, &task.id, |t| {
+                        if value["type"] == "thread.started" {
+                            if let Some(id) = value["thread_id"].as_str() {
+                                if !t.session_ids.iter().any(|s| s == id) { t.session_ids.push(id.into()); }
+                            }
+                        }
                         if task.review_pending {
                             if !review_event(&mut recovery_state, &value) { failed = true; }
                         } else if generating && value["type"] == "item.completed" && value["item"]["type"] == "agent_message" {
@@ -976,7 +986,7 @@ fn save_proposals(d: &mut Data, source: &Task, mut reply: GenReply) {
             skipped += 1;
             continue;
         }
-        let mut task = Task { execution_mode: ExecutionMode::Worktree, blocker_id: None, id: id(), project_id: source.project_id.clone(), title: title.into(), model: d.settings.hard_model.clone(), status: "future".into(), difficulty: Some(Difficulty::Hard), messages: vec![], created_at: now(), queued_at: now(), elapsed_ms: 0, started_at: None, thread_id: None, error: None, sent_count: 0, cancel: false, cleanup_at: None, attention: None, worktree: None, awaiting_merge: false, merging: false, review_pending: false, review_attempted: false, content_planning: false, content_plan_id: None, content_revision: 0, implementation_completed: false };
+        let mut task = Task { execution_mode: ExecutionMode::Worktree, blocker_id: None, id: id(), project_id: source.project_id.clone(), title: title.into(), model: d.settings.hard_model.clone(), status: "future".into(), difficulty: Some(Difficulty::Hard), messages: vec![], created_at: now(), queued_at: now(), elapsed_ms: 0, started_at: None, thread_id: None, session_ids: vec![], error: None, sent_count: 0, cancel: false, cleanup_at: None, attention: None, worktree: None, awaiting_merge: false, merging: false, review_pending: false, review_attempted: false, content_planning: false, content_plan_id: None, content_revision: 0, implementation_completed: false };
         task.content_plan_id = source.content_plan_id.clone();
         task.content_revision = source.content_revision;
         task.message("user", proposal.text.trim());
@@ -1141,9 +1151,7 @@ async fn cleanup_approved(app: &App) {
     let mut store = app.lock().await;
     let expired: Vec<Task> = store.data.tasks.iter().filter(|t| t.status == "done" && t.cleanup_at.is_some_and(|at| at <= now())).cloned().collect();
     for task in expired {
-        let result = if let Some(thread) = &task.thread_id {
-            delete_session(&store.data.settings.codex_path, thread).await
-        } else { Ok(()) };
+        let result = cleanup::task_resources(&store, &task).await;
         let mut d = store.data.clone();
         if let Err(e) = result {
             let t = d.tasks.iter_mut().find(|t| t.id == task.id).unwrap();
@@ -1202,6 +1210,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _legacy_lock = legacy_lock;
     let mut data: Data = if file.exists() { serde_json::from_slice(&std::fs::read(&file)?)? } else { initial_data() };
     for t in &mut data.tasks {
+        if let Some(thread) = &t.thread_id {
+            if !t.session_ids.contains(thread) { t.session_ids.push(thread.clone()); }
+        }
         t.merging = false;
         if t.status == "now" {
             t.elapsed_ms += data.saved_at.saturating_sub(t.started_at.unwrap_or(data.saved_at));
@@ -1615,7 +1626,7 @@ mod tests {
         assert!(old.attachments.is_empty());
     }
     fn task(status: &str, queued_at: u64) -> Task {
-        Task { execution_mode: ExecutionMode::Worktree, blocker_id: None, id: id(), project_id: "p".into(), title: "Test".into(), model: "".into(), status: status.into(), difficulty: None, messages: vec![], created_at: 0, queued_at, elapsed_ms: 0, started_at: None, thread_id: None, error: None, sent_count: 0, cancel: false, cleanup_at: None, attention: None, worktree: None, awaiting_merge: false, merging: false, review_pending: false, review_attempted: false, content_planning: false, content_plan_id: None, content_revision: 0, implementation_completed: false }
+        Task { execution_mode: ExecutionMode::Worktree, blocker_id: None, id: id(), project_id: "p".into(), title: "Test".into(), model: "".into(), status: status.into(), difficulty: None, messages: vec![], created_at: 0, queued_at, elapsed_ms: 0, started_at: None, thread_id: None, session_ids: vec![], error: None, sent_count: 0, cancel: false, cleanup_at: None, attention: None, worktree: None, awaiting_merge: false, merging: false, review_pending: false, review_attempted: false, content_planning: false, content_plan_id: None, content_revision: 0, implementation_completed: false }
     }
     #[test]
     fn queue_is_fifo_and_sequential_by_default() {

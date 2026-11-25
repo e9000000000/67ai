@@ -33,6 +33,7 @@ pub fn attach(child: &tokio::process::Child, id: &str, task: &Task, project: &Pr
 }
 
 pub fn remove(id: &str) { RUNS.lock().unwrap().retain(|r| r.id != id); }
+pub fn remove_task(id: &str) { RUNS.lock().unwrap().retain(|r| r.task != id); }
 
 fn process_ids(job: HANDLE) -> Result<Vec<u32>, String> {
     let mut buffer = vec![0usize; 64];

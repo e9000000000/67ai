@@ -190,7 +190,8 @@ try {
   await action({action:'approve_task',id:second});
   await stop();
   const saved=JSON.parse(await readFile(path.join(root,'67ai.json'),'utf8'));
-  saved.tasks.find(t=>t.id===attached).cleanup_at=Date.now()-1;
+  // The fake reuses one session for every run; give this cleanup target its own session.
+  Object.assign(saved.tasks.find(t=>t.id===attached),{cleanup_at:Date.now()-1,thread_id:'cleanup-session',session_ids:['cleanup-session']});
   saved.tasks.find(t=>t.id===second).cleanup_at=Date.now()-1;
   saved.tasks.find(t=>t.id===second).thread_id='fail-delete';
   await writeFile(path.join(root,'67ai.json'),JSON.stringify(saved));
@@ -204,7 +205,7 @@ try {
   assert.equal(d.tasks.find(t=>t.id===second).cleanup_at,null);
   const deleted=JSON.parse(await readFile(path.join(root,'deleted-session.json'),'utf8'));
   assert.equal(deleted.method,'thread/delete');
-  assert.equal(deleted.params.threadId,'11111111-1111-4111-8111-111111111111');
+  assert.equal(deleted.params.threadId,'cleanup-session');
   assert.equal((await fetch(`${url}/api/attachments/${document.id}`)).status,400);
   assert.equal(await readFile(path.join(projectA,'AGENTS.md'),'utf8'),'# Test instructions');
   const cross=await fetch(`${url}/api/action`,{method:'POST',headers:{Origin:'https://example.com','Content-Type':'application/json'},body:'{}'});assert.equal(cross.status,403);
