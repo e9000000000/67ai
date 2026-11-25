@@ -1,0 +1,36 @@
+{
+  "outcome": "completed",
+  "message": "Content research ready. Choose a direction.",
+  "tasks": [],
+  "content": {
+    "inventory": [
+      {
+        "finding": "Unknown: no supported content loader found; feature prerequisite required",
+        "paths": [],
+        "examples": "Unknown: no system or examples available"
+      }
+    ],
+    "unknowns": [
+      "Runtime behavior unknown; fake inspection only"
+    ],
+    "directions": [
+      {
+        "title": "Build authoring prerequisite",
+        "experience": "Practice a short sequence of jumps",
+        "reuse": "Unknown: no loader found",
+        "authoring": "FEATURE WORK: implement a level loader first",
+        "prerequisites": "FEATURE WORK: loader and validation required before content",
+        "scope": "One loader with one sample, then two levels",
+        "constraints": "No new mechanics beyond the stated prerequisite; reuse tiles",
+        "quality_checks": "Load each level; verify start, exit and reachable jumps",
+        "tasks": [
+          {
+            "title": "Feature: add level loader",
+            "text": "Implement a text level loader and validate one sample before authoring two levels."
+          }
+        ]
+      }
+    ],
+    "recommendation": "Build and verify the loader prerequisite first"
+  }
+}

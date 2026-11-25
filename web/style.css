@@ -235,3 +235,8 @@ dialog.fullscreen .dialog-body { flex: 1; min-height: 0; max-height: none; displ
 .task-card.awaiting-merge:hover { background: #46301a; border-color: #f5a34b; }
 .merge-status { color: #f5a34b; padding: 12px 0; }
 input[type="checkbox"] { width: auto; accent-color: var(--accent); }
+
+.content-research article { border-bottom: 1px solid var(--border); padding: 12px 0; }
+.content-research dd { margin: 0 0 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.content-research dt { font-weight: 600; text-transform: capitalize; }
+.content-research p { white-space: pre-wrap; overflow-wrap: anywhere; }

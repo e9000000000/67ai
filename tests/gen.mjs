@@ -30,7 +30,7 @@ async function start() {
 }
 async function stop() { const done=new Promise(r=>server.once('exit',r)); server.kill(); await done; server=null; }
 async function create(title) { return (await action({action:'create_task',project_id:projectId,title,text:'Investigate the project',difficulty:'gen',model:'gen-test-model',status:'todo'})).id; }
-const generated = d=>d.tasks.filter(t=>t.difficulty==='hard');
+const generated = d=>d.tasks.filter(t=>t.difficulty==='hard' && t.project_id===projectId);
 try {
   await start();
   projectId=(await action({action:'add_project',name:'Gen project',path:projectPath})).id;
@@ -91,6 +91,51 @@ try {
   await action({action:'delete_task',id});
   assert.equal(generated(await state()).length,3);
 
+  const upload=await fetch(`${url}/api/attachments?name=reference.txt&media_type=text/plain`,{method:'POST',body:'Keep this evidence'});
+  assert.equal(upload.status,200); const attachmentId=(await upload.json()).id;
+  const contentProjects=[];
+  for(const kind of ['existing','empty','missing']) {
+    const folder=path.join(root,kind); await mkdir(folder);
+    if(kind!=='missing')await writeFile(path.join(folder,'content-system.txt'),'Level loader: text format; author with text editor; reuse tiles');
+    if(kind==='existing')await writeFile(path.join(folder,'level-one.txt'),'Start, two jumps, exit');
+    const before=await readdir(folder);
+    const pid=(await action({action:'add_project',name:`Content ${kind}`,path:folder})).id;
+    const key=(await action({action:'create_task',project_id:pid,attachments:kind==='empty'?[attachmentId]:[],title:'Content discovery',text:kind==='empty'?"I don't know":'',difficulty:'gen',content_planning:true,model:'gen-test-model',status:'todo'})).id;
+    d=await until(d=>d.tasks.find(t=>t.id===key)?.status==='done');
+    const plan=d.content_plans.find(p=>p.source_id===key);
+    assert.ok(plan,JSON.stringify(d.tasks.find(t=>t.id===key)));
+    assert.equal(d.tasks.filter(t=>t.project_id===pid).length,1);
+    assert.equal(plan.brief,null);
+    assert.match(plan.research.unknowns[0],/unknown/i);
+    if(kind==='existing')assert.ok(plan.research.inventory[0].paths.includes('level-one.txt'));
+    if(kind==='empty')assert.match(plan.research.inventory[0].examples,/No examples.*zero/);
+    if(kind==='missing')assert.match(plan.research.directions[0].prerequisites,/FEATURE WORK/);
+    assert.deepEqual(await readdir(folder),before);
+    contentProjects.push({pid,key,plan});
+  }
+  const chosen=contentProjects[1];
+  const brief=structuredClone(chosen.plan.research.directions[0]); brief.scope='One introductory level'; brief.tasks=[{title:'Author one intro',text:'One introductory level; validate loader and exit.'}];
+  await action({action:'select_content',id:chosen.plan.id,brief});
+  const duplicate=await fetch(`${url}/api/action`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'select_content',id:chosen.plan.id,brief})});
+  assert.equal(duplicate.status,400);
+  d=await state();
+  assert.equal(d.tasks.filter(t=>t.project_id===chosen.pid&&t.difficulty==='hard').length,1);
+  assert.equal(d.tasks.find(t=>t.title==='Author one intro').status,'future');
+  await action({action:'approve_task',id:chosen.key});
+  await stop();
+  // Exercise the real timed cleanup without waiting thirty minutes.
+  const savedPath=path.join(root,'67ai.json'); const saved=JSON.parse(await readFile(savedPath,'utf8'));
+  saved.tasks.find(t=>t.id===chosen.key).cleanup_at=Date.now()-1;
+  await writeFile(savedPath,JSON.stringify(saved)); await start();
+  d=await until(d=>!d.tasks.some(t=>t.id===chosen.key));
+  assert.equal(d.content_plans.find(p=>p.id===chosen.plan.id).brief.scope,brief.scope);
+  assert.deepEqual(d.content_plans.find(p=>p.id===chosen.plan.id).research,chosen.plan.research);
+  const reference=await fetch(`${url}/api/attachments/${attachmentId}`); assert.equal(reference.status,200); assert.equal(await reference.text(),'Keep this evidence');
+  await action({action:'send_message',id:contentProjects[0].key,text:'Revise toward one shorter batch. Research only.'});
+  d=await until(d=>d.tasks.find(t=>t.id===contentProjects[0].key)?.status==='done');
+  assert.equal(d.content_plans.filter(p=>p.source_id===contentProjects[0].key).length,2);
+  assert.equal(d.tasks.filter(t=>t.project_id===contentProjects[0].pid&&t.difficulty==='hard').length,0);
+
   if(process.env.PLAYWRIGHT_MODULE) {
     const {chromium}=await import(pathToFileURL(path.resolve(process.env.PLAYWRIGHT_MODULE)).href);
     const browser=await chromium.launch({channel:'msedge',headless:true,args:['--mute-audio']});
@@ -110,16 +155,49 @@ try {
         await page.locator('header .app-menu > summary').click();
         await page.getByRole('button',{name:label,exact:true}).click();
         assert.equal(await page.locator('[name="project_id"]').inputValue(),projectId);
-        assert.ok((await page.locator('#task-instructions').inputValue()).length>80);
+        if(label==='Gen more content')assert.equal(await page.locator('#content-goal').inputValue(),'');
+        else assert.ok((await page.locator('#task-instructions').inputValue()).length>80);
         if(label==='Find issues') {
           await page.getByRole('button',{name:'Start Gen',exact:true}).click();
           await page.locator('#dialog').waitFor({state:'hidden'});
           await until(d=>d.tasks.some(t=>t.title===label && t.difficulty==='gen' && t.status==='done'));
         } else {
-          if(label==='Gen more content')await page.screenshot({path:path.join(root,'gen-content.png')});
-          await page.getByRole('button',{name:'Close dialog'}).click();
+          if(label==='Gen more content') {
+            await page.screenshot({path:path.join(root,'gen-content.png')});
+            await page.getByRole('button',{name:'Explore content',exact:true}).click();
+            await page.locator('#dialog').waitFor({state:'hidden'});
+            await until(d=>d.tasks.some(t=>t.title==='Gen more content'&&t.content_planning&&t.status==='done'));
+          } else await page.getByRole('button',{name:'Close dialog'}).click();
         }
       }
+      await page.getByRole('button',{name:'Content existing',exact:true}).click();
+      await page.locator('header .app-menu > summary').click();
+      await page.getByRole('button',{name:'Content plans',exact:true}).click();
+      await page.locator('[data-plan]').last().click();
+      await page.getByText('content-system.txt ? level-one.txt',{exact:true}).waitFor();
+      await page.getByRole('button',{name:'Choose / revise: Short challenge levels',exact:true}).click();
+      await page.locator('[name="scope"]').fill('One level with two jumps');
+      await page.locator('[name="quality_checks"]').fill('Check both jumps and the exit');
+      await page.locator('[name="title_0"]').fill('UI selected intro');
+      await page.locator('[name="text_0"]').fill('Author one level with two jumps; check both jumps and the exit.');
+      await page.screenshot({path:path.join(root,'content-brief.png')});
+      await page.getByRole('button',{name:'Save brief & create Future cards',exact:true}).click();
+      await page.locator('#dialog').waitFor({state:'hidden'});
+      d=await state();
+      const uiBrief=d.content_plans.find(p=>p.brief?.scope==='One level with two jumps');
+      assert.ok(uiBrief);
+      const cards=d.tasks.filter(t=>t.project_id===contentProjects[0].pid&&t.difficulty==='hard');
+      assert.equal(cards.length,1); assert.equal(cards[0].status,'future'); assert.match(cards[0].messages[0].text,/Check both jumps/);
+      assert.ok(!d.tasks.some(t=>t.title==='Author exploration route'));
+      await action({action:'delete_task',id:contentProjects[0].key});
+      await page.reload();
+      await page.getByRole('button',{name:'Content existing',exact:true}).click();
+      await page.locator('header .app-menu > summary').click();
+      await page.getByRole('button',{name:'Content plans',exact:true}).click();
+      await page.getByRole('button',{name:'Content existing ? Short challenge levels',exact:true}).click();
+      await page.getByText('One level with two jumps',{exact:true}).waitFor();
+      await page.getByRole('button',{name:'Close dialog'}).click();
+      await page.getByRole('button',{name:'Gen project',exact:true}).click();
       await page.locator('header .app-menu > summary').click();
       await page.getByRole('button',{name:'New task',exact:true}).click();
       await page.getByRole('button',{name:'Gen',exact:true}).waitFor();

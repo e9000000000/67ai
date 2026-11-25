@@ -77,7 +77,7 @@ const formEnd = (label='Save', extra='') => `<p class="form-error" id="form-erro
 function attachmentMarkup(file, url) {
   return `${['image/png','image/jpeg','image/webp','image/gif'].includes(file.media_type) ? `<img src="${escape(url)}" alt="${escape(file.name)}">` : '<span aria-hidden="true">▤</span>'}<span>${escape(file.name)}</span>`;
 }
-function attachFiles(input) {
+function attachFiles(input, optional = false) {
   const zone = input.parentElement;
   const area = document.createElement('div'); area.className = 'attachment-editor';
   area.innerHTML = '<div class="attachment-list" aria-live="polite"></div><button type="button" class="button small attach-button">Attach files</button><span class="attachment-hint">Paste or drop images and files · Up to 25 MB each</span><input type="file" multiple hidden>';
@@ -85,7 +85,7 @@ function attachFiles(input) {
   const picker = $('input', area), list = $('.attachment-list', area);
   let files = [];
   const render = () => {
-    input.required = !files.length;
+    input.required = !optional && !files.length;
     list.innerHTML = files.map((f,i) => `<div class="attachment-chip">${attachmentMarkup({name:f.file.name,media_type:f.file.type}, f.url)}<button type="button" data-remove="${i}" class="icon-button" aria-label="Remove ${escape(f.file.name)}">×</button></div>`).join('');
   };
   const add = items => {
@@ -126,12 +126,36 @@ function addProject() {
   formSubmit(async f => { const result = await api({action:'add_project',name:f.get('name'),path:f.get('path')}); projectId=result.id;renderBoard();toast('Project added'); });
 }
 function genTask(kind) {
+  if(kind === "content") return startContent();
   const presets = {
     issues: ['Find issues', 'Thoroughly investigate this project for bugs, broken behavior, and other concrete problems. Create one Future task for each distinct issue with evidence, reproduction details where possible, relevant files, and acceptance criteria. Do not fix anything.'],
-    content: ['Gen more content', 'Investigate what content can extend this project using its existing systems and mechanics, such as more levels or continuation of its existing story. Create actionable Future tasks grounded in current content, formats, and assets. Do not propose new features or changes to how the project works. Do not generate production content or implement anything.'],
     features: ['Gen new features', 'Investigate this project and propose useful new features that fit its purpose and current design. Create a separate actionable Future task for each distinct feature with rationale, scope, relevant systems, and acceptance criteria. Do not implement anything.']
   };
   newTask('todo', presets[kind]);
+}
+function startContent() {
+  if(!data.projects.length)return addProject();
+  modal('Plan more content', `<form id="modal-form"><p class="help">Start with a project. Gen inspects its content and suggests evidence-backed directions. Research creates no implementation cards.</p><label class="field"><span>Project</span><select name="project_id" required><option value="">Select a project</option>${data.projects.map(p=>`<option value="${p.id}" ${p.id===projectId?'selected':''}>${escape(p.name)}</option>`).join('')}</select></label><label class="field"><span>Goal (optional)</span><textarea id="content-goal" name="text" placeholder="I don't know"></textarea></label>${formEnd('Explore content')}`);
+  const attachments=attachFiles($('#content-goal'), true);
+  formSubmit(async f=>{await api({action:'create_task',project_id:f.get('project_id'),text:f.get('text'),title:'Gen more content',difficulty:'gen',content_planning:true,model:data.settings.gen_model||'',status:'todo',attachments:await attachments.upload()});});
+}
+function contentPlans() {
+  const plans=(data.content_plans||[]).filter(p=>!projectId||p.project_id===projectId);
+  modal('Content plans', `<p class="help">Research and saved briefs remain here after task cleanup.</p>${plans.length?plans.map(p=>`<p><button class="button" data-plan="${p.id}">${escape(project(p.project_id)?.name)} ? ${escape(p.brief?.title||'Choose a content direction')}</button></p>`).join(''):'<p>No content research yet. Use Gen more content to start.</p>'}`);
+  document.querySelectorAll('[data-plan]').forEach(b=>b.onclick=()=>openContent(b.dataset.plan));
+}
+function openContent(key) {
+  const p=data.content_plans.find(p=>p.id===key), r=p.research;
+  const references=`<details><summary>Research conversation and attachments</summary>${p.messages.filter(m=>['user','assistant','reviewer'].includes(m.role)).map(m=>`<article>${messageBody(m)}${(m.attachments||[]).map(f=>`<p><a href="/api/attachments/${encodeURIComponent(f.id)}" download="${escape(f.name)}">${escape(f.name)}</a></p>`).join('')}</article>`).join('')}</details>`;
+  const details=d=>`<dl>${['experience','reuse','authoring','prerequisites','scope','constraints','quality_checks'].map(k=>`<dt>${escape(k.replaceAll('_',' '))}</dt><dd>${escape(d[k])}</dd>`).join('')}</dl>`;
+  modal('Content research and brief', `<div class="content-research"><h3>Inventory</h3>${r.inventory.map(e=>`<article><p>${escape(e.finding)}</p><p>Examples: ${escape(e.examples)}</p><p class="path">${e.paths.map(escape).join(' ? ')||'Unknown source'}</p></article>`).join('')}<h3>Unknowns</h3><p>${escape(r.unknowns.join('\n')||'None reported')}</p><h3>Recommended first step</h3><p>${escape(r.recommendation)}</p>${references}${p.brief?`<h3>Saved brief: ${escape(p.brief.title)}</h3>${details(p.brief)}${p.brief.tasks.map(t=>`<p><strong>${escape(t.title)}</strong>: ${escape(t.text)}</p>`).join('')}`:r.directions.map((d,i)=>`<article><h3>${escape(d.title)}</h3>${details(d)}<button class="button" data-direction="${i}">Choose / revise: ${escape(d.title)}</button></article>`).join('')}${!p.brief&&task(p.source_id)?'<button class="button" id="revise-research">Ask Gen to revise directions</button>':''}</div>`,true);
+  document.querySelectorAll('[data-direction]').forEach(b=>b.onclick=()=>editContent(key,Number(b.dataset.direction)));
+  if($('#revise-research'))$('#revise-research').onclick=()=>{$('#dialog').close();openTask(p.source_id);$('#message-input').focus();};
+}
+function editContent(key,index) {
+  const p=data.content_plans.find(p=>p.id===key), d=p.research.directions[index];
+  modal('Revise and save content brief', `<form id="modal-form"><p class="help">Save creates only these tasks in Future. Nothing starts automatically. For a different direction or new evidence, ask Gen to revise the research.</p>${['title','experience','reuse','authoring','prerequisites','scope','constraints','quality_checks'].map(k=>`<label class="field"><span>${escape(k.replaceAll('_',' '))}</span><textarea name="${k}" required>${escape(d[k])}</textarea></label>`).join('')}<h3>First batch tasks</h3>${d.tasks.map((t,i)=>`<label class="field"><span>Task ${i+1} title</span><input name="title_${i}" value="${escape(t.title)}" required></label><label class="field"><span>Task ${i+1} scope and checks</span><textarea name="text_${i}" required>${escape(t.text)}</textarea></label>`).join('')}${formEnd('Save brief & create Future cards')}` ,true);
+  formSubmit(async f=>{const brief=Object.fromEntries(['title','experience','reuse','authoring','prerequisites','scope','constraints','quality_checks'].map(k=>[k,f.get(k)]));brief.tasks=d.tasks.map((t,i)=>({title:f.get(`title_${i}`),text:f.get(`text_${i}`)}));await api({action:'select_content',id:key,brief});toast('Brief saved. Selected tasks are in Future.');});
 }
 function newTask(status = 'todo', preset = null) {
   if (!data.projects.length) { addProject(); toast('Add your first project folder, then create a task.'); return; }
@@ -192,6 +216,8 @@ function refreshPanel() {
   $('#message-input').placeholder=needsAttention(t)?'Type your answer or instructions to continue…':'Add details or ask Codex to continue…';
   $('#panel-title').classList.toggle('card-error',needsAttention(t));
   $('#send-message').disabled=!!t.awaiting_merge;
+  let planner=$('#task-content-plans');
+  if(t.content_planning&&!planner){planner=document.createElement('button');planner.id='task-content-plans';planner.className='button small';planner.textContent='View content directions / briefs';$('#messages').before(planner);planner.onclick=()=>{const plans=(data.content_plans||[]).filter(p=>p.source_id===t.id);if(plans.length)openContent(plans.at(-1).id);else toast('Research is not ready yet.');};}
   const signature=JSON.stringify([t.messages,t.error,t.attention,t.status,t.awaiting_merge,t.merging]);if(signature===lastMessages)return;lastMessages=signature;
   const messages=$('#messages');const atBottom=messages.scrollHeight-messages.scrollTop-messages.clientHeight<90||!messages.innerHTML;
   const opened=[...messages.querySelectorAll('details[open]')].map(el=>el.dataset.index);
@@ -288,3 +314,5 @@ setInterval(()=>{if(!data)return;document.querySelectorAll('[data-cleanup]').for
 let disconnected = false;
 pollLimits();
 async function poll(){try{await refresh();}catch(e){if(!disconnected)toast('Server disconnected');disconnected=true;}setTimeout(poll,1200);}poll();
+
+$("#content-plans-button").onclick=()=>{if(data)contentPlans();};

@@ -46,6 +46,21 @@ fn main() {
         println!(r#"{{"type":"thread.started","thread_id":"gen-session"}}"#);
         std::io::stdout().flush().unwrap();
         std::thread::sleep(Duration::from_millis(if title.contains("GEN_STOP") { 4000 } else { 500 }));
+        if prompt.contains("CONTENT PLANNING:") {
+            assert!(prompt.contains("tasks MUST be empty"));
+            assert!(prompt.contains("FEATURE WORK"));
+            let supported = std::path::Path::new("content-system.txt").exists();
+            let examples = std::path::Path::new("level-one.txt").exists();
+            if supported { assert_eq!(std::fs::read_to_string("content-system.txt").unwrap(), "Level loader: text format; author with text editor; reuse tiles"); }
+            if examples { assert_eq!(std::fs::read_to_string("level-one.txt").unwrap(), "Start, two jumps, exit"); }
+            let response = if !supported { include_str!("fixtures/content/missing.json") }
+                else if !examples { include_str!("fixtures/content/empty.json") }
+                else { include_str!("fixtures/content/existing.json") };
+            let escaped = response.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n").replace('\r', "\\r");
+            println!(r#"{{"type":"item.completed","item":{{"type":"agent_message","text":"{escaped}"}}}}"#);
+            println!(r#"{{"type":"turn.completed"}}"#);
+            return;
+        }
         if title.contains("GEN_INVALID") {
             println!(r#"{{"type":"item.completed","item":{{"type":"agent_message","text":"Invalid Gen response"}}}}"#);
         } else {

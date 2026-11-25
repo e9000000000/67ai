@@ -1,0 +1,54 @@
+{
+  "outcome": "completed",
+  "message": "Content research ready. Choose a direction.",
+  "tasks": [],
+  "content": {
+    "inventory": [
+      {
+        "finding": "Text level system supported, reusable tiles and text editor authoring",
+        "paths": [
+          "content-system.txt"
+        ],
+        "examples": "No examples: supported system has zero authored levels"
+      }
+    ],
+    "unknowns": [
+      "Runtime behavior unknown; fake inspection only"
+    ],
+    "directions": [
+      {
+        "title": "Short challenge levels",
+        "experience": "Practice a short sequence of jumps",
+        "reuse": "Existing level loader and tiles",
+        "authoring": "Text editor using content-system.txt format",
+        "prerequisites": "None; existing loader supports this batch",
+        "scope": "Two short levels, each with at most three jumps",
+        "constraints": "No new mechanics beyond the stated prerequisite; reuse tiles",
+        "quality_checks": "Load each level; verify start, exit and reachable jumps",
+        "tasks": [
+          {
+            "title": "Author two challenge levels",
+            "text": "Use content-system.txt; author the first two examples and check each exit is reachable."
+          }
+        ]
+      },
+      {
+        "title": "Exploration route",
+        "experience": "Practice a short sequence of jumps",
+        "reuse": "Existing level loader and tiles",
+        "authoring": "Text editor using content-system.txt format",
+        "prerequisites": "None; existing loader supports this batch",
+        "scope": "One route with two branches",
+        "constraints": "No new mechanics beyond the stated prerequisite; reuse tiles",
+        "quality_checks": "Load each level; verify start, exit and reachable jumps",
+        "tasks": [
+          {
+            "title": "Author exploration route",
+            "text": "One route, two branches, verify both exits."
+          }
+        ]
+      }
+    ],
+    "recommendation": "Start with two short levels to reuse the verified format"
+  }
+}
