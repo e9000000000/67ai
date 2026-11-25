@@ -34,6 +34,11 @@ try {
   const projectId=(await action({action:'add_project',name:'Blocker project',path:projectPath})).id;
   const create=async(title,status='future',blocker_id=null,text='Work')=>(await action({action:'create_task',project_id:projectId,title,text,status,model:'',blocker_id})).id;
   const blocker=await create('Prerequisite');
+  const done=await create('Finished task');
+  await action({action:'move_task',id:done,status:'done'});
+  const approved=await create('Approved task');
+  await action({action:'move_task',id:approved,status:'done'});
+  await action({action:'approve_task',id:approved});
   const otherPath=path.join(root,'other-project');
   await mkdir(otherPath);
   const otherProject=(await action({action:'add_project',name:'Other project',path:otherPath})).id;
@@ -53,6 +58,7 @@ try {
     await page.locator('[name="title"]').fill('Dependent');
     await page.locator('#task-instructions').fill('Work');
     assert.equal(await page.locator('[name="project_id"]').inputValue(),projectId);
+    for (const id of [done,approved]) assert.equal(await page.locator(`[name="blocker_id"] option[value="${id}"]`).count(),0);
     assert.equal(await page.locator(`[name="blocker_id"] option[value="${otherBlocker}"]`).count(),0);
     await page.locator('[name="blocker_id"]').selectOption(blocker);
     await page.locator('[name="project_id"]').selectOption(otherProject);
@@ -71,6 +77,7 @@ try {
     await page.locator('#task-blocker-status').filter({hasText:'Waiting for blocker: Prerequisite'}).waitFor();
     await page.locator('.task-menu > summary').click();
     assert.equal(await page.locator('#task-blocker').inputValue(),blocker);
+    for (const id of [done,approved]) assert.equal(await page.locator(`#task-blocker option[value="${id}"]`).count(),0);
     assert.equal(await page.locator(`#task-blocker option[value="${otherBlocker}"]`).count(),0);
     assert.equal(await page.locator(`#task-blocker option[value="${dependent}"]`).count(),0);
     const alternative=await create('Alternative');
@@ -79,6 +86,12 @@ try {
     await until(d=>d.tasks.find(t=>t.id===dependent).blocker_id===alternative);
     await page.locator('#task-blocker').selectOption(blocker);
     await until(d=>d.tasks.find(t=>t.id===dependent).blocker_id===blocker);
+    await action({action:'move_task',id:alternative,status:'done'});
+    await page.locator(`#task-blocker option[value="${alternative}"]`).waitFor({state:'detached'});
+    await action({action:'move_task',id:done,status:'future'});
+    await page.locator(`#task-blocker option[value="${done}"]`).waitFor({state:'attached'});
+    await action({action:'move_task',id:done,status:'done'});
+    await page.locator(`#task-blocker option[value="${done}"]`).waitFor({state:'detached'});
     await page.screenshot({path:path.join(root,'task-blocker.png')});
     await page.getByRole('button',{name:'Close task',exact:true}).click();
     for (const open of ['gen', 'content']) {
@@ -90,6 +103,7 @@ try {
       await page.locator('[name="blocker_id"]').selectOption(otherBlocker);
       await page.locator('[name="project_id"]').selectOption(projectId);
       assert.equal(await page.locator('[name="blocker_id"]').inputValue(),'');
+      for (const id of [done,approved]) assert.equal(await page.locator(`[name="blocker_id"] option[value="${id}"]`).count(),0);
       assert.equal(await page.locator(`[name="blocker_id"] option[value="${otherBlocker}"]`).count(),0);
       await page.locator('[name="blocker_id"]').selectOption(blocker);
       await page.getByRole('button',{name:'Close dialog',exact:true}).click();

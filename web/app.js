@@ -198,7 +198,7 @@ function bindBlockerProject() {
 }
 function blockerOptions(current = null, selectedProject = current?.project_id) {
   const candidates = (data.tasks || []).filter(t => {
-    if (t.project_id !== selectedProject) return false;
+    if (t.project_id !== selectedProject || t.status === 'done' || t.cleanup_at) return false;
     let next = t;
     const seen = new Set();
     while (next) {
