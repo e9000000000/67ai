@@ -13,7 +13,8 @@
 # git workflow
 - there is should be git repo with .gitignore
 - always commit changes. everything should be commited
-- always make sure you are on a right branch, for each platform there should be a separate branch
+- Only `main` should exist in this repository, locally and on GitHub. Work directly on `main`; do not create platform, feature, or task branches.
+- Keep `main` tracking `origin/main` so `git push` works without extra arguments.
 
 
 # scam workflow

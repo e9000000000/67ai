@@ -20,7 +20,7 @@ After changes, run `.\restart.ps1` to stop this checkout's existing server, rebu
 
 ## GitHub releases
 
-Windows development uses the `windows` branch. Push it with `git push -u origin windows` the first time, then `git push`. The Windows release workflow runs on every branch push containing the workflow (not tag pushes), tests the code, builds the Windows x64 executable, and creates a GitHub release with `taskdesk.exe` attached. Each run gets a unique `windows-<run number>-<attempt>` tag targeting the pushed commit. Failed tests or builds prevent release creation. It uses GitHub's built-in token; no extra secret is needed.
+All development uses `main`, the repository's only branch, which tracks `origin/main`. Push with `git push`. The Windows release workflow runs on every push to `main` (not tag pushes), tests the code, builds the Windows x64 executable, and creates a GitHub release with `taskdesk.exe` attached. Each run gets a unique `windows-<run number>-<attempt>` tag targeting the pushed commit. Failed tests or builds prevent release creation. It uses GitHub's built-in token; no extra secret is needed.
 
 ## Workflow
 

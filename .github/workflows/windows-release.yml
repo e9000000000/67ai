@@ -2,7 +2,7 @@ name: Windows release
 
 on:
   push:
-    branches: ['**']
+    branches: [main]
   workflow_dispatch:
 
 permissions:
