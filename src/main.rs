@@ -277,13 +277,12 @@ fn queue_auto_reviews(d: &mut Data) {
     }
 }
 #[cfg(any(windows, test))]
-fn waiting_for_approval(d: &Data) -> usize {
+fn finished_tasks(d: &Data) -> usize {
     let mut count = 0;
     for t in &d.tasks {
         if t.status == "future" { continue; }
         if t.status != "done" || t.awaiting_merge || t.merging || t.review_pending || t.attention.is_some() || t.error.is_some() { return 0; }
-        if t.cleanup_at.is_some() { continue; }
-        let auto_review = !t.review_attempted && d.projects.iter().find(|p| p.id == t.project_id).is_some_and(|p| match t.difficulty {
+        let auto_review = t.cleanup_at.is_none() && !t.review_attempted && d.projects.iter().find(|p| p.id == t.project_id).is_some_and(|p| match t.difficulty {
             Some(Difficulty::Easy) => p.auto_approve_easy, Some(Difficulty::Hard) => p.auto_approve_hard, _ => false,
         });
         if auto_review { return 0; }
@@ -294,14 +293,14 @@ fn waiting_for_approval(d: &Data) -> usize {
 
 #[cfg(windows)]
 async fn notification_worker(app: App, tray: tray::Tray, mut shutdown: watch::Receiver<bool>) {
-    *NOTIFICATION.lock().await = notification::Notification::new(waiting_for_approval(&app.lock().await.data) > 0);
+    *NOTIFICATION.lock().await = notification::Notification::new(finished_tasks(&app.lock().await.data) > 0);
     loop {
         tokio::select! {
             _ = shutdown.changed() => break,
             _ = tokio::time::sleep(std::time::Duration::from_millis(400)) => {
                 let store = app.lock().await;
-                let count = waiting_for_approval(&store.data);
-                if NOTIFICATION.lock().await.poll(count > 0, store.data.saved_at, now()) { tray.notify_ready(count); }
+                let count = finished_tasks(&store.data);
+                if NOTIFICATION.lock().await.poll(count > 0, store.data.saved_at, now()) { tray.notify_ready(); }
             }
         }
     }
@@ -1342,37 +1341,37 @@ mod tests {
     }
 
     #[test]
-    fn approval_notification_waits_for_all_work() {
+    fn completion_notification_waits_for_all_work() {
         let mut d = initial_data();
-        assert_eq!(waiting_for_approval(&d), 0);
+        assert_eq!(finished_tasks(&d), 0);
         d.tasks = vec![task("done", 0), task("future", 0)];
-        assert_eq!(waiting_for_approval(&d), 1);
+        assert_eq!(finished_tasks(&d), 1);
         for status in ["todo", "now"] {
             d.tasks[1].status = status.into();
-            assert_eq!(waiting_for_approval(&d), 0);
+            assert_eq!(finished_tasks(&d), 0);
         }
         d.tasks[1].status = "done".into();
-        assert_eq!(waiting_for_approval(&d), 2);
+        assert_eq!(finished_tasks(&d), 2);
         for field in ["awaiting_merge", "merging", "review_pending", "attention", "error"] {
             let mut value = serde_json::to_value(&d).unwrap();
             value["tasks"][1][field] = if matches!(field, "attention" | "error") { json!("unfinished") } else { json!(true) };
-            assert_eq!(waiting_for_approval(&serde_json::from_value(value).unwrap()), 0, "{field}");
+            assert_eq!(finished_tasks(&serde_json::from_value(value).unwrap()), 0, "{field}");
         }
         d.tasks[1].cleanup_at = Some(now() + 60_000);
-        assert_eq!(waiting_for_approval(&d), 1);
+        assert_eq!(finished_tasks(&d), 2);
         d.tasks[0].cleanup_at = Some(now() + 60_000);
-        assert_eq!(waiting_for_approval(&d), 0);
+        assert_eq!(finished_tasks(&d), 2);
         d.tasks[0].cleanup_at = None;
         d.tasks[0].difficulty = Some(Difficulty::Easy);
         d.projects.push(Project { id: "p".into(), name: "Project".into(), path: String::new(), auto_approve_easy: true, auto_approve_hard: true });
-        assert_eq!(waiting_for_approval(&d), 0);
+        assert_eq!(finished_tasks(&d), 0);
         d.tasks[0].difficulty = Some(Difficulty::Hard);
-        assert_eq!(waiting_for_approval(&d), 0);
+        assert_eq!(finished_tasks(&d), 0);
         d.tasks[0].difficulty = Some(Difficulty::Gen);
-        assert_eq!(waiting_for_approval(&d), 1);
+        assert_eq!(finished_tasks(&d), 2);
         d.tasks[0].difficulty = Some(Difficulty::Hard);
         d.tasks[0].review_attempted = true;
-        assert_eq!(waiting_for_approval(&d), 1);
+        assert_eq!(finished_tasks(&d), 2);
     }
 
     #[test]

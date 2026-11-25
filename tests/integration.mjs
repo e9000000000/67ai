@@ -10,7 +10,7 @@ const fake = path.join(root, 'fake-codex.exe');
 const compile = spawnSync('rustc', ['tests/fake_codex.rs', '-o', fake], {stdio:'inherit', windowsHide:true});
 assert.equal(compile.status, 0);
 const url = 'http://127.0.0.1:3031';
-let server;
+let server, presenceHeartbeat;
 const delay = ms => new Promise(r=>setTimeout(r,ms));
 async function state() { const r=await fetch(`${url}/api/state`);assert.equal(r.status,200);return (await r.json()).data; }
 async function action(value, expected=200) {
@@ -28,6 +28,14 @@ async function start() {
 async function stop() { const done=new Promise(r=>server.once('exit',r));server.kill();await done; }
 try {
   await start();
+  const beforePresence = await state();
+  const reportPresence = rendered_at => fetch(`${url}/api/presence`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({id:'integration-board', focused:true, rendered_at})});
+  const presence = await reportPresence(beforePresence.saved_at);
+  assert.equal(presence.status, 204);
+  assert.equal((await state()).saved_at, beforePresence.saved_at, 'Presence must not modify saved task data');
+  assert.equal((await fetch(`${url}/api/presence`, {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'})).status, 422);
+  // Keep this non-UI suite silent; native sound playback is checked by the tray test.
+  presenceHeartbeat = setInterval(() => reportPresence(0).catch(()=>{}), 1200);
   const limits = await (await fetch(`${url}/api/rate-limits`)).json();
   assert.equal(limits.rateLimits.secondary.usedPercent, 37);
   assert.equal(limits.rateLimits.secondary.windowDurationMins, 10080);
@@ -203,4 +211,4 @@ try {
   const foreign=await new Promise((resolve,reject)=>{http.get(`${url}/api/state`,{headers:{Host:'attacker.example:3031'}},r=>{r.resume();resolve(r.statusCode);}).on('error',reject);});assert.equal(foreign,403);
   const css=await fetch(`${url}/style.css`);assert.equal(css.status,200);
   console.log('PASS: approval, revive, persistent timer, expiry cleanup, deletion failure, feedback queue, pause, sequential default, global FIFO, follow-up resume, future isolation, failure, isolated stop, restart, templates, AGENTS conflict, origin and host restrictions.');
-} finally { if(server&&server.exitCode===null)await stop(); }
+} finally { clearInterval(presenceHeartbeat); if(server&&server.exitCode===null)await stop(); }

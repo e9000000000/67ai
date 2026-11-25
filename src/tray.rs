@@ -2,12 +2,14 @@ use std::{io, mem::size_of, ptr::{null, null_mut}};
 use tokio::sync::watch;
 use windows_sys::Win32::{
     Foundation::{HWND, LPARAM, LRESULT, WPARAM},
+    Media::Audio::{PlaySoundW, SND_ASYNC, SND_MEMORY, SND_NODEFAULT},
     System::LibraryLoader::GetModuleHandleW,
     UI::{Shell::*, WindowsAndMessaging::*},
 };
 
 const CALLBACK: u32 = WM_APP + 1;
 const NOTIFY_READY: u32 = WM_APP + 2;
+const BARK: &[u8] = include_bytes!("../assets/sounds/task-ready.wav");
 const OPEN: usize = 1;
 const EXIT: usize = 2;
 
@@ -38,23 +40,9 @@ unsafe extern "system" fn window_proc(window: HWND, message: u32, w: WPARAM, l: 
             if message == state.taskbar_created { icon(window, NIM_ADD); return 0; }
             match message {
                 NOTIFY_READY => {
-                    let mut data: NOTIFYICONDATAW = std::mem::zeroed();
-                    data.cbSize = size_of::<NOTIFYICONDATAW>() as u32;
-                    data.hWnd = window;
-                    data.uID = 1;
-                    data.uFlags = NIF_INFO;
-                    data.dwInfoFlags = NIIF_INFO | NIIF_NOSOUND;
-                    let title = wide("67ai: ready for approval");
-                    let text = wide(&format!("All tasks are done and merged. {w} task(s) waiting for approval. Click to open the board."));
-                    data.szInfoTitle[..title.len()].copy_from_slice(&title);
-                    data.szInfo[..text.len()].copy_from_slice(&text);
-                    let shown = Shell_NotifyIconW(NIM_MODIFY, &data);
-                    if shown == 0 { eprintln!("Could not show the 67ai notification"); }
-                    return shown as LRESULT;
-                }
-                CALLBACK if l as u32 == NIN_BALLOONUSERCLICK => {
-                    SendMessageW(window, WM_COMMAND, OPEN, 0);
-                    return 0;
+                    let played = PlaySoundW(BARK.as_ptr().cast(), null_mut(), SND_MEMORY | SND_ASYNC | SND_NODEFAULT);
+                    if played == 0 { eprintln!("Could not play the 67ai notification sound"); }
+                    return played as LRESULT;
                 }
                 CALLBACK if l as u32 == WM_RBUTTONUP => {
                     let menu = CreatePopupMenu();
@@ -90,8 +78,8 @@ unsafe extern "system" fn window_proc(window: HWND, message: u32, w: WPARAM, l: 
 
 pub struct Tray { window: usize, thread: Option<std::thread::JoinHandle<()>> }
 impl Tray {
-    pub fn notify_ready(&self, count: usize) {
-        unsafe { PostMessageW(self.window as HWND, NOTIFY_READY, count, 0); }
+    pub fn notify_ready(&self) {
+        unsafe { PostMessageW(self.window as HWND, NOTIFY_READY, 0, 0); }
     }
 
     pub fn start(port: u16, stop: watch::Sender<bool>) -> io::Result<Self> {
@@ -138,7 +126,8 @@ mod tests {
         let (stop, shutdown) = watch::channel(false);
         let tray = Tray::start(3038, stop).unwrap();
         assert!(!*shutdown.borrow());
-        assert_ne!(unsafe { SendMessageW(tray.window as HWND, NOTIFY_READY, 2, 0) }, 0);
+        assert_ne!(unsafe { SendMessageW(tray.window as HWND, NOTIFY_READY, 0, 0) }, 0);
+        std::thread::sleep(std::time::Duration::from_millis(650));
         unsafe { SendMessageW(tray.window as HWND, WM_COMMAND, EXIT, 0); }
         assert!(*shutdown.borrow());
         drop(tray);

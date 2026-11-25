@@ -47,8 +47,9 @@ async function refresh() {
   renderBoard(); if (selectedTask) refreshPanel();
   refreshShell();
   refreshContentPlan();
-  renderedAt = result.data.saved_at;
-  reportPresence();
+  const reportRendered = () => { renderedAt = Math.max(renderedAt, result.data.saved_at); reportPresence(); };
+  if (document.visibilityState === 'visible') requestAnimationFrame(() => requestAnimationFrame(reportRendered));
+  else reportRendered();
 }
 function modelOptions(value = '', withConfig = true) {
   const all = [...new Set([...models, data.settings.hard_model, data.settings.easy_model, data.settings.gen_model, value].filter(Boolean))];

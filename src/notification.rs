@@ -25,10 +25,11 @@ impl Notification {
         else if !self.ready { self.pending = Some((revision, time)); }
         self.ready = ready;
         let Some((revision, since)) = self.pending else { return false; };
+        if self.clients.iter().any(|c| c.presence.focused) { self.pending = None; return false; }
         // Let polling boards apply Done before alerting. Sleeping/closed tabs expire.
         if time.saturating_sub(since) < 1500 || self.clients.iter().any(|c| c.presence.rendered_at < revision) { return false; }
         self.pending = None;
-        !self.clients.iter().any(|c| c.presence.focused)
+        true
     }
 }
 
@@ -57,15 +58,14 @@ mod tests {
         n.presence(client("background", false, 2), 1000);
         n.presence(client("foreground", true, 2), 1000);
         assert!(!n.poll(true, 2, 1000));
-        assert!(!n.poll(true, 2, 2600));
-        n.presence(client("foreground", false, 2), 2700);
+        n.presence(client("foreground", false, 2), 1100);
         assert!(!n.poll(true, 2, 2700));
     }
 
     #[test]
     fn closed_tabs_expire_and_no_browser_is_required() {
         let mut n = Notification::new(false);
-        n.presence(client("closed", true, 1), 1000);
+        n.presence(client("closed", false, 1), 1000);
         assert!(!n.poll(true, 2, 1000));
         assert!(!n.poll(true, 2, 2600));
         assert!(n.poll(true, 2, 6000));
