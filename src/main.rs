@@ -358,7 +358,6 @@ async fn run_codex(app: &App, task: &Task, project: &Project, settings: &Setting
     let mut images = vec![];
     let store = app.lock().await;
     let schema = store.file.parent().unwrap().join("response-schema.json");
-    std::fs::write(&schema, include_str!("response-schema.json")).map_err(|e| e.to_string())?;
     let mut parts = vec![];
     for message in task.messages[task.sent_count..].iter().filter(|m| m.role == "user") {
         parts.push(message.text.clone());
@@ -435,10 +434,13 @@ async fn run_codex(app: &App, task: &Task, project: &Project, settings: &Setting
 }
 
 fn next_task(d: &Data) -> Option<usize> {
-    if d.settings.paused || d.tasks.iter().any(|t| t.status == "now") { return None; }
-    d.tasks.iter().enumerate().filter(|(_, t)| t.status == "todo" && t.error.is_none()).min_by_key(|(_, t)| t.queued_at).map(|(i, _)| i)
+    if d.settings.paused { return None; }
+    d.tasks.iter().enumerate().filter(|(_, t)| t.status == "todo" && t.error.is_none()
+        && !d.tasks.iter().any(|other| other.project_id == t.project_id && other.status == "now"))
+        .min_by_key(|(_, t)| t.queued_at).map(|(i, _)| i)
 }
 async fn worker(app: App, mut shutdown: watch::Receiver<bool>) {
+    let mut runs = tokio::task::JoinSet::new();
     loop {
         if *shutdown.borrow() { break; }
         let job = {
@@ -455,27 +457,38 @@ async fn worker(app: App, mut shutdown: watch::Receiver<bool>) {
             } else { None }
         };
         if let Some((task, project, settings)) = job {
-            let result = run_codex(&app, &task, &project, &settings, &mut shutdown).await;
-            let stopped = *shutdown.borrow();
-            if let Err(e) = update_task(&app, &task.id, |t| {
-                t.elapsed_ms += now().saturating_sub(t.started_at.unwrap_or(now())); t.started_at = None;
-                match result {
-                    Ok(()) => {
-                        t.sent_count = task.messages.len();
-                        let pending = t.messages[t.sent_count..].iter().any(|m| m.role == "user");
-                        t.status = if pending { "todo" } else { "done" }.into();
-                        t.queued_at = now(); t.error = None;
-                        if pending { t.attention = None; }
-                        t.message("system", if pending { "Run ended. Your follow-up is queued." } else if t.attention.is_some() { "Task unfinished. Reply below to continue." } else { "Run completed." });
+            let app = app.clone();
+            let mut shutdown = shutdown.clone();
+            runs.spawn(async move {
+                let result = run_codex(&app, &task, &project, &settings, &mut shutdown).await;
+                let stopped = *shutdown.borrow();
+                if let Err(e) = update_task(&app, &task.id, |t| {
+                    t.elapsed_ms += now().saturating_sub(t.started_at.unwrap_or(now())); t.started_at = None;
+                    match result {
+                        Ok(()) => {
+                            t.sent_count = task.messages.len();
+                            let pending = t.messages[t.sent_count..].iter().any(|m| m.role == "user");
+                            t.status = if pending { "todo" } else { "done" }.into();
+                            t.queued_at = now(); t.error = None;
+                            if pending { t.attention = None; }
+                            t.message("system", if pending { "Run ended. Your follow-up is queued." } else if t.attention.is_some() { "Task unfinished. Reply below to continue." } else { "Run completed." });
+                        }
+                        Err(e) => { t.status = if t.cancel || stopped { "future" } else { "done" }.into(); t.attention = if t.cancel || stopped { None } else { Some("failed".into()) }; t.error = Some(e.clone()); t.message("system", e); }
                     }
-                    Err(e) => { t.status = if t.cancel || stopped { "future" } else { "done" }.into(); t.attention = if t.cancel || stopped { None } else { Some("failed".into()) }; t.error = Some(e.clone()); t.message("system", e); }
-                }
-                t.cancel = false;
-            }).await { eprintln!("Cannot persist result; worker stopped: {e}"); break; }
+                    t.cancel = false;
+                }).await { eprintln!("Cannot persist result: {e}"); }
+            });
         } else {
-            tokio::select! { _ = shutdown.changed() => break, _ = tokio::time::sleep(std::time::Duration::from_millis(400)) => {} }
+            tokio::select! {
+                _ = shutdown.changed() => break,
+                result = runs.join_next(), if !runs.is_empty() => {
+                    if let Some(Err(e)) = result { eprintln!("Task worker failed: {e}"); }
+                },
+                _ = tokio::time::sleep(std::time::Duration::from_millis(400)) => {}
+            }
         }
     }
+    while runs.join_next().await.is_some() {}
 }
 
 async fn delete_session(executable: &str, thread: &str) -> Result<(), String> {
@@ -578,6 +591,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(&dir)?;
     let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join("taskdesk.lock"))?;
     lock.try_lock().map_err(|_| "This Taskdesk data directory is already open in another server")?;
+    std::fs::write(dir.join("response-schema.json"), include_str!("response-schema.json"))?;
     let file = dir.join("taskdesk.json");
     let mut data: Data = if file.exists() { serde_json::from_slice(&std::fs::read(&file)?)? } else { initial_data() };
     for t in &mut data.tasks {
@@ -690,10 +704,13 @@ mod tests {
         Task { id: id(), project_id: "p".into(), title: "Test".into(), model: "".into(), status: status.into(), messages: vec![], created_at: 0, queued_at, elapsed_ms: 0, started_at: None, thread_id: None, error: None, sent_count: 0, cancel: false, cleanup_at: None, attention: None }
     }
     #[test]
-    fn queue_is_global_fifo_and_never_runs_future_or_parallel() {
+    fn queue_is_fifo_per_project_and_allows_other_projects() {
         let mut d = initial_data(); d.tasks = vec![task("future", 0), task("todo", 20), task("todo", 10)];
         assert_eq!(next_task(&d), Some(2));
         d.tasks[2].status = "now".into(); assert_eq!(next_task(&d), None);
+        d.tasks.push(task("todo", 30)); d.tasks[3].project_id = "other".into();
+        assert_eq!(next_task(&d), Some(3));
+        d.tasks[3].status = "now".into(); assert_eq!(next_task(&d), None);
         d.tasks[2].status = "done".into(); assert_eq!(next_task(&d), Some(1));
         d.settings.paused = true; assert_eq!(next_task(&d), None);
         d.settings.paused = false; d.tasks[1].error = Some("failed".into()); assert_eq!(next_task(&d), None);

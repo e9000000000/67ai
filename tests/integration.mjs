@@ -68,8 +68,7 @@ try {
   const second=await create(b,'Second');
   await delay(500);assert((await state()).tasks.every(t=>t.status!=='now'));
   await action({action:'settings',...settings,paused:false});
-  d=await until(d=>d.tasks.find(t=>t.id===first).status==='now');
-  assert.equal(d.tasks.find(t=>t.id===second).status,'todo');
+  d=await until(d=>[first,second].every(id=>d.tasks.find(t=>t.id===id).status==='now'));
   await action({action:'send_message',id:first,text:'Follow-up'});
   await action({action:'save_agents',project_id:a,content:'blocked',original:'# Test instructions'},400);
   d=await until(d=>d.tasks.filter(t=>t.status==='done').length===2);
@@ -126,10 +125,30 @@ try {
     assert.equal(d.tasks.find(t=>t.id===key).thread_id,unfinished.thread_id);
     assert((await readFile(path.join(projectA,'last-args.json'),'utf8')).includes('resume'));
   }
-  const waiting=await create(a,'WAIT_TEST');await until(d=>d.tasks.find(t=>t.id===waiting).status==='now');
+  const waiting=await create(a,'WAIT_TEST');await until(d=>d.tasks.find(t=>t.id===waiting).thread_id);
+  const queuedFirst=await create(a,'Queued first');
+  const queuedSecond=await create(a,'Queued second');
+  const parallel=await create(b,'WAIT_TEST parallel');
+  await until(d=>d.tasks.find(t=>t.id===parallel).thread_id);
+  await delay(800);
+  d=await state();
+  assert.equal(d.tasks.find(t=>t.id===queuedFirst).status,'todo');
+  assert.equal(d.tasks.find(t=>t.id===queuedSecond).status,'todo');
+  await action({action:'settings',...settings,paused:true});
   await action({action:'move_task',id:waiting,status:'done'},400);
   await action({action:'stop_task',id:waiting});d=await until(d=>d.tasks.find(t=>t.id===waiting).status==='future');
   assert.match(d.tasks.find(t=>t.id===waiting).error,/Stopped by you/);
+  await delay(500);d=await state();
+  assert.equal(d.tasks.find(t=>t.id===parallel).status,'now');
+  assert.equal(d.tasks.find(t=>t.id===queuedFirst).status,'todo');
+  await action({action:'settings',...settings,paused:false});
+  d=await until(d=>d.tasks.find(t=>t.id===queuedFirst).status==='now');
+  assert.equal(d.tasks.find(t=>t.id===queuedSecond).status,'todo');
+  d=await until(d=>d.tasks.find(t=>t.id===queuedSecond).status==='now');
+  assert.equal(d.tasks.find(t=>t.id===queuedFirst).status,'done');
+  await until(d=>d.tasks.find(t=>t.id===queuedSecond).status==='done');
+  await action({action:'stop_task',id:parallel});
+  await until(d=>d.tasks.find(t=>t.id===parallel).status==='future');
   const interrupted=await create(b,'WAIT_TEST restart');await until(d=>d.tasks.find(t=>t.id===interrupted).thread_id);
   await stop();await start();d=await state();assert.equal(d.tasks.find(t=>t.id===interrupted).status,'future');
   assert.equal(d.tasks.find(t=>t.id===attached).messages[0].attachments[0].name,'screen.png');
@@ -177,5 +196,5 @@ try {
   const cross=await fetch(`${url}/api/action`,{method:'POST',headers:{Origin:'https://example.com','Content-Type':'application/json'},body:'{}'});assert.equal(cross.status,403);
   const foreign=await new Promise((resolve,reject)=>{http.get(`${url}/api/state`,{headers:{Host:'attacker.example:3031'}},r=>{r.resume();resolve(r.statusCode);}).on('error',reject);});assert.equal(foreign,403);
   const css=await fetch(`${url}/style.css`);assert.equal(css.status,200);
-  console.log('PASS: approval, revive, persistent timer, expiry cleanup, deletion failure, feedback queue, pause, FIFO across projects, follow-up resume, future isolation, failure, stop, restart, templates, AGENTS conflict, origin and host restrictions.');
+  console.log('PASS: approval, revive, persistent timer, expiry cleanup, deletion failure, feedback queue, pause, parallel projects, FIFO within projects, follow-up resume, future isolation, failure, isolated stop, restart, templates, AGENTS conflict, origin and host restrictions.');
 } finally { if(server&&server.exitCode===null)await stop(); }

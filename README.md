@@ -14,7 +14,7 @@ Install Rust and Codex CLI, then run `codex login` if needed. From this folder:
 .\start.ps1
 ```
 
-Open http://127.0.0.1:3030. The launcher builds the release executable and starts it in the current terminal. Ctrl+C stops the server and its current run. For development, use `cargo run`. The HTML, CSS and JavaScript are embedded in the executable, so rebuild after editing them.
+Open http://127.0.0.1:3030. The launcher builds the release executable and starts it in the current terminal. Ctrl+C stops the server and its active runs. For development, use `cargo run`. The HTML, CSS and JavaScript are embedded in the executable, so rebuild after editing them.
 
 After changes, run `.\restart.ps1` to stop this checkout's existing server, rebuild the release version, start it in the background, and open your default browser when it is ready. This interrupts any running task; interrupted tasks return to Future. The script respects `TASKDESK_PORT` and `TASKDESK_DATA_DIR`.
 
@@ -26,11 +26,11 @@ Windows development uses the `windows` branch. Push it with `git push -u origin 
 
 - Add a project using an existing absolute folder path.
 - **Future:** parked indefinitely. Messages are saved without starting Codex.
-- **Todo:** automatically enters the global FIFO queue. One Codex process runs at a time across all projects.
+- **Todo:** automatically enters the FIFO queue for its project. Different projects run in parallel, with one Codex process at a time per project.
 - **Now:** the worker owns this state. Open the task to read progress, commands, file changes, and replies. Stop moves it back to Future.
-- **Done:** Codex ended its run. Questions, refusals, blockers, and failed runs appear as red cards with an attention label; they are unfinished. The browser tab reads **QUESTION** while any Done task needs attention, across all projects. Open the card and use **Send answer & continue** (or Ctrl+Enter) to reply and queue the same conversation. Unfinished tasks cannot be approved for cleanup. A follow-up message moves it to Todo and joins the global queue in the same Codex thread. **Approve** starts a 30-minute cleanup countdown. **Revive** cancels it and keeps the task in Done; sending feedback or changing its state also cancels cleanup. When the timer expires, Taskdesk deletes the Codex session, board task/conversation, and attachments not used by other tasks. Project files stay. The countdown survives restarts and runs independently of queue pause; overdue cleanup runs on startup. Session deletion requires a Codex version supporting `thread/delete`. If deletion fails, the task stays with an error; approve again to retry.
+- **Done:** Codex ended its run. Questions, refusals, blockers, and failed runs appear as red cards with an attention label; they are unfinished. The browser tab reads **QUESTION** while any Done task needs attention, across all projects. Open the card and use **Send answer & continue** (or Ctrl+Enter) to reply and queue the same conversation. Unfinished tasks cannot be approved for cleanup. A follow-up message moves it to Todo and joins the queue for its project in the same Codex thread. **Approve** starts a 30-minute cleanup countdown. **Revive** cancels it and keeps the task in Done; sending feedback or changing its state also cancels cleanup. When the timer expires, Taskdesk deletes the Codex session, board task/conversation, and attachments not used by other tasks. Project files stay. The countdown survives restarts and runs independently of queue pause; overdue cleanup runs on startup. Session deletion requires a Codex version supporting `thread/delete`. If deletion fails, the task stays with an error; approve again to retry.
 
-Drag cards between Future, Todo and Done. Messages sent during a run wait for a follow-up run; they do not interrupt the current turn. Pause queue prevents new runs while allowing the current one to finish. Failed tasks remain red in Done with an error and require a message or Retry before they run again. Elapsed time is cumulative across runs and excludes queue time.
+Drag cards between Future, Todo and Done. Messages sent during a run wait for a follow-up run; they do not interrupt the current turn. Pause queue prevents new runs while allowing active runs to finish. Failed tasks remain red in Done with an error and require a message or Retry before they run again. Elapsed time is cumulative across runs and excludes queue time.
 
 Paste images or files with Ctrl+V into task instructions or a follow-up message, drag files onto either editor, or use **Attach files** (25 MB per file). Image previews and file chips can be removed before sending. Attachments persist under the data directory and appear in the conversation for download. PNG, JPEG, WebP and GIF images are passed to Codex as image inputs; other files are provided by their saved local paths. Clipboard file support depends on the browser and source application; drag-and-drop and the file picker are also available.
 
@@ -46,7 +46,7 @@ Use **Settings → Manage templates** to create, rename, edit, duplicate, or del
 
 Projects, tasks, conversations, templates and settings are stored in `data/taskdesk.json`, using a temporary file and atomic replacement. Codex keeps its own thread history in its normal home directory. A file lock prevents two servers from opening the same data directory. Interrupted tasks return to Future on restart rather than silently rerunning; elapsed time is checkpointed every five seconds.
 
-The server binds only to `127.0.0.1` and rejects foreign Host and Origin headers. New and resumed Codex runs use `--dangerously-bypass-approvals-and-sandbox`: no Codex sandbox or approval prompts, with access allowed by the Windows account and any enforced administrator policies. Your configured agent features still apply. On Windows, each run is contained in a kill-on-close job so stopping or exiting the server also terminates child processes. There is no parallel mode.
+The server binds only to `127.0.0.1` and rejects foreign Host and Origin headers. New and resumed Codex runs use `--dangerously-bypass-approvals-and-sandbox`: no Codex sandbox or approval prompts, with access allowed by the Windows account and any enforced administrator policies. Your configured agent features still apply. On Windows, each run is contained in a kill-on-close job so stopping or exiting the server also terminates child processes. Projects run in parallel; tasks within each project run one at a time.
 
 Environment overrides:
 
