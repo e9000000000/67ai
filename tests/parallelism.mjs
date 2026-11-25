@@ -32,7 +32,7 @@ const receipt={role:'system',text:'Merged into main.\nCommit: abc123\nProject: C
 const completed={id:'t',title:'Completed',status:'done',messages:[{role:'system',text:'Codex started working.'},receipt]};
 assert.match(ui.card(completed),/class="merge-receipt"/);
 assert.match(ui.card(completed),/Commit: abc123/);
-assert.match(ui.mergeReceipt({...completed,messages:[{role:'system',text:'Merged into main.'}]}),/>Merged into main</);
+assert.match(ui.mergeReceipt({...completed,messages:[{role:'system',text:'Merged into main.'}]}),/>merged</);
 for(const changed of [{status:'todo'},{status:'now'},{awaiting_merge:true},{merging:true},{attention:'blocked'},{error:'failed'},
   {messages:[receipt,{role:'system',text:'Codex started working.'}]}])assert.equal(ui.mergeReceipt({...completed,...changed}),'');
 assert.equal(ui.mergeReceipt({...completed,messages:[{role:'assistant',text:'Merged into main.'}]}),'');
@@ -193,7 +193,7 @@ try {
       assert.match(await mergedCard.locator('.merge-receipt').getAttribute('title'),/Commit: [0-9a-f]{40}/);
       await mergedCard.click();
       await page.locator('#panel-difficulty .merge-receipt').waitFor();
-      assert.equal(await page.locator('#panel-difficulty .merge-receipt').innerText(),'Merged into main');
+      assert.equal(await page.locator('#panel-difficulty .merge-receipt').innerText(),'merged');
       await page.screenshot({path:path.join(root,'merge-receipt.png')});
       await page.locator('#close-task').click();
       await page.locator('header .app-menu > summary').click();

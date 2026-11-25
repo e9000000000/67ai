@@ -90,7 +90,7 @@ function mergeReceipt(t) {
   for(const m of [...(t.messages||[])].reverse()) {
     if(m.role!=='system')continue;
     if(m.text==='Codex started working.')return '';
-    if(m.text==='Merged into main.'||m.text.startsWith('Merged into main.\n'))return `<span class="merge-receipt" title="${escape(m.text)}">Merged into main</span>`;
+    if(m.text==='Merged into main.'||m.text.startsWith('Merged into main.\n'))return `<span class="merge-receipt" title="${escape(m.text)}">merged</span>`;
   }
   return '';
 }
