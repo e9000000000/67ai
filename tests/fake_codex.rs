@@ -23,6 +23,24 @@ fn main() {
     }
     let mut prompt = String::new();
     std::io::stdin().read_to_string(&mut prompt).unwrap();
+    if prompt.starts_with("Task: Resolve parallel task merge conflicts\n") {
+        let args: Vec<String> = std::env::args().collect();
+        assert!(!args.iter().any(|a| a == "resume"));
+        assert!(!prompt.contains("Do not switch branches, merge into main"));
+        assert!(prompt.contains("Original task instructions:"));
+        println!(r#"{{"type":"thread.started","thread_id":"merge-repair"}}"#);
+        if args.iter().any(|a| a == "merge-fail") {
+            println!(r#"{{"type":"turn.failed","error":{{"message":"Resolution failed"}}}}"#);
+            std::process::exit(1);
+        }
+        if !args.iter().any(|a| a == "merge-noop") {
+            std::fs::write("base.txt", "main edit\ntask edit\n").unwrap();
+            assert!(std::process::Command::new("git").args(["add", "base.txt"]).status().unwrap().success());
+        }
+        println!(r#"{{"type":"item.completed","item":{{"type":"agent_message","text":"{{\"outcome\":\"completed\",\"message\":\"Resolved\"}}"}}}}"#);
+        println!(r#"{{"type":"turn.completed"}}"#);
+        return;
+    }
     if prompt.contains("PARALLEL_TEST") {
         let title = prompt.lines().next().unwrap().strip_prefix("Task: ").unwrap();
         std::fs::write(format!("{title}.txt"), &prompt).unwrap();
