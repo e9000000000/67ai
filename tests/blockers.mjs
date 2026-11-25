@@ -34,6 +34,13 @@ try {
   const projectId=(await action({action:'add_project',name:'Blocker project',path:projectPath})).id;
   const create=async(title,status='future',blocker_id=null,text='Work')=>(await action({action:'create_task',project_id:projectId,title,text,status,model:'',blocker_id})).id;
   const blocker=await create('Prerequisite');
+  const otherPath=path.join(root,'other-project');
+  await mkdir(otherPath);
+  const otherProject=(await action({action:'add_project',name:'Other project',path:otherPath})).id;
+  const otherBlocker=(await action({action:'create_task',project_id:otherProject,title:'Other prerequisite',text:'Work',status:'future',model:''})).id;
+  assert.match(await action({action:'create_task',project_id:projectId,title:'Invalid',text:'Work',status:'future',model:'',blocker_id:otherBlocker},400),/same project/);
+  assert.match(await action({action:'set_blocker',id:blocker,blocker_id:otherBlocker},400),/same project/);
+  assert.equal((await state()).tasks.find(t=>t.id===blocker).blocker_id,null);
   let dependent;
   if(process.env.PLAYWRIGHT_MODULE) {
     const {chromium}=await import(pathToFileURL(path.resolve(process.env.PLAYWRIGHT_MODULE)).href);
@@ -45,6 +52,15 @@ try {
     await page.getByRole('button',{name:'New task',exact:true}).click();
     await page.locator('[name="title"]').fill('Dependent');
     await page.locator('#task-instructions').fill('Work');
+    assert.equal(await page.locator('[name="project_id"]').inputValue(),projectId);
+    assert.equal(await page.locator(`[name="blocker_id"] option[value="${otherBlocker}"]`).count(),0);
+    await page.locator('[name="blocker_id"]').selectOption(blocker);
+    await page.locator('[name="project_id"]').selectOption(otherProject);
+    assert.equal(await page.locator('[name="blocker_id"]').inputValue(),'');
+    assert.equal(await page.locator(`[name="blocker_id"] option[value="${blocker}"]`).count(),0);
+    await page.locator('[name="blocker_id"]').selectOption(otherBlocker);
+    await page.locator('[name="project_id"]').selectOption(projectId);
+    assert.equal(await page.locator('[name="blocker_id"]').inputValue(),'');
     await page.locator('[name="blocker_id"]').selectOption(blocker);
     await page.screenshot({path:path.join(root,'create-blocker.png')});
     await page.getByRole('button',{name:'Easy',exact:true}).click();
@@ -55,6 +71,7 @@ try {
     await page.locator('#task-blocker-status').filter({hasText:'Waiting for blocker: Prerequisite'}).waitFor();
     await page.locator('.task-menu > summary').click();
     assert.equal(await page.locator('#task-blocker').inputValue(),blocker);
+    assert.equal(await page.locator(`#task-blocker option[value="${otherBlocker}"]`).count(),0);
     assert.equal(await page.locator(`#task-blocker option[value="${dependent}"]`).count(),0);
     const alternative=await create('Alternative');
     await page.locator(`#task-blocker option[value="${alternative}"]`).waitFor({state:'attached'});
@@ -64,6 +81,19 @@ try {
     await until(d=>d.tasks.find(t=>t.id===dependent).blocker_id===blocker);
     await page.screenshot({path:path.join(root,'task-blocker.png')});
     await page.getByRole('button',{name:'Close task',exact:true}).click();
+    for (const open of ['gen', 'content']) {
+      await page.evaluate(kind=>kind==='gen'?genTask('issues'):startContent(),open);
+      assert.equal(await page.locator('[name="project_id"]').inputValue(),'');
+      assert.equal(await page.locator('[name="blocker_id"] option').count(),1);
+      await page.locator('[name="project_id"]').selectOption(otherProject);
+      assert.equal(await page.locator(`[name="blocker_id"] option[value="${blocker}"]`).count(),0);
+      await page.locator('[name="blocker_id"]').selectOption(otherBlocker);
+      await page.locator('[name="project_id"]').selectOption(projectId);
+      assert.equal(await page.locator('[name="blocker_id"]').inputValue(),'');
+      assert.equal(await page.locator(`[name="blocker_id"] option[value="${otherBlocker}"]`).count(),0);
+      await page.locator('[name="blocker_id"]').selectOption(blocker);
+      await page.getByRole('button',{name:'Close dialog',exact:true}).click();
+    }
     await page.setViewportSize({width:390,height:844});
     await page.locator('header .app-menu > summary').click();
     await page.getByRole('button',{name:'New task',exact:true}).click();
@@ -90,5 +120,5 @@ try {
   assert.equal((await state()).tasks.find(t=>t.id===waiting).status,'todo');
   await action({action:'send_message',id:question,text:'ANSWER_TEST'});
   await until(d=>d.tasks.find(t=>t.id===waiting)?.status==='done');
-  console.log('Blocker creation, editing, persistence, completion, question, and queue checks passed');
+  console.log('Blocker project isolation, creation, editing, persistence, completion, question, and queue checks passed');
 } finally { if(browser)await browser.close(); if(server)await stop(); }

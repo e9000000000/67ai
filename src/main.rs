@@ -230,12 +230,13 @@ fn nonempty(s: &str, name: &str) -> Result<(), (StatusCode, String)> {
 fn task_mut<'a>(d: &'a mut Data, key: &str) -> Result<&'a mut Task, (StatusCode, String)> {
     d.tasks.iter_mut().find(|t| t.id == key).ok_or_else(|| bad("Task not found"))
 }
-fn validate_blocker(d: &Data, key: &str, blocker: Option<&str>) -> Result<(), (StatusCode, String)> {
+fn validate_blocker(d: &Data, key: &str, project_id: &str, blocker: Option<&str>) -> Result<(), (StatusCode, String)> {
     let mut next = blocker;
     for _ in 0..=d.tasks.len() {
         let Some(id) = next else { return Ok(()); };
         if id == key { return Err(bad("Tasks cannot block themselves or form a circular dependency")); }
         let task = d.tasks.iter().find(|t| t.id == id).ok_or_else(|| bad("Blocker task not found"))?;
+        if task.project_id != project_id { return Err(bad("Blocker task must belong to the same project")); }
         next = task.blocker_id.as_deref();
     }
     Err(bad("Circular blocker dependency"))
@@ -350,7 +351,7 @@ async fn action(State(app): State<App>, Json(action): Json<Action>) -> ApiResult
             if status == "done" { return Err(bad("New tasks must start in future or todo")); }
             if !d.projects.iter().any(|p| p.id == project_id) { return Err(bad("Project not found")); }
             let blocker_id = blocker_id.filter(|id| !id.is_empty());
-            validate_blocker(&d, "", blocker_id.as_deref())?;
+            validate_blocker(&d, "", &project_id, blocker_id.as_deref())?;
             let mut task = Task { blocker_id, id: id(), project_id, title: title.trim().into(), model, status, difficulty, messages: vec![], shell_commands: vec![], created_at: now(), queued_at: now(), elapsed_ms: 0, started_at: None, thread_id: None, error: None, sent_count: 0, cancel: false, cleanup_at: None, attention: None, worktree: None, awaiting_merge: false, merging: false, review_pending: false, review_attempted: false, content_planning, content_plan_id: None, content_revision: 0, implementation_completed: false };
             task.message("user", text.trim()); task.messages.last_mut().unwrap().attachments = attachments;
             result = json!({"id": task.id}); d.tasks.push(task);
@@ -363,7 +364,8 @@ async fn action(State(app): State<App>, Json(action): Json<Action>) -> ApiResult
         }
         Action::SetBlocker { id, blocker_id } => {
             let blocker_id = blocker_id.filter(|id| !id.is_empty());
-            validate_blocker(&d, &id, blocker_id.as_deref())?;
+            let project_id = &d.tasks.iter().find(|t| t.id == id).ok_or_else(|| bad("Task not found"))?.project_id;
+            validate_blocker(&d, &id, project_id, blocker_id.as_deref())?;
             let t = task_mut(&mut d, &id)?; idle(t)?;
             t.blocker_id = blocker_id;
         }

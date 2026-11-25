@@ -162,6 +162,7 @@ function genTask(kind) {
 function startContent() {
   if(!data.projects.length)return addProject();
   modal('Plan more content', `<form id="modal-form"><p class="help">Start with a project. Gen inspects its content and suggests evidence-backed directions. Research creates no implementation cards.</p><label class="field"><span>Project</span><select name="project_id" required><option value="">Select a project</option>${data.projects.map(p=>`<option value="${p.id}" ${p.id===projectId?'selected':''}>${escape(p.name)}</option>`).join('')}</select></label><label class="field"><span>Goal (optional)</span><textarea id="content-goal" name="text" placeholder="I don't know"></textarea></label><label class="field"><span>Blocker</span><select name="blocker_id" aria-label="Blocker task">${blockerOptions()}</select></label>${formEnd('Explore content')}`);
+  bindBlockerProject();
   const attachments=attachFiles($('#content-goal'), true);
   formSubmit(async f=>{await api({action:'create_task',project_id:f.get('project_id'),text:f.get('text'),title:'Gen more content',difficulty:'gen',content_planning:true,blocker_id:f.get('blocker_id')||null,model:data.settings.gen_model||'',status:'todo',attachments:await attachments.upload()});});
 }
@@ -184,12 +185,20 @@ function editContent(key,index) {
 function newTask(status = 'todo', preset = null) {
   if (!data.projects.length) { addProject(); toast('Add your first project folder, then create a task.'); return; }
   modal(preset ? preset[0] : 'New task', `<form id="modal-form" class="new-task-form"><label class="field"><span>Title</span><input name="title" value="${escape(preset?.[0] || '')}" placeholder="What should the agent work on?" required autofocus maxlength="200"></label><div class="field instructions-field"><label for="task-instructions">Instructions</label><textarea id="task-instructions" name="text" placeholder="Describe the outcome, relevant details, and how to check the result..." required>${escape(preset?.[1] || '')}</textarea>${preset ? '<p class="help">Research only. Creates tasks in Future without implementing changes.</p>' : ''}</div><div class="new-task-footer"><label class="field"><span>Blocker</span><select name="blocker_id" aria-label="Blocker task">${blockerOptions()}</select></label><label class="field"><span>Project</span><select name="project_id" required>${preset && !projectId ? '<option value="" selected disabled>Select a project</option>' : ''}${data.projects.map(p=>`<option value="${p.id}" ${p.id===projectId?'selected':''}>${escape(p.name)}</option>`).join('')}</select></label>${preset ? '<button type="submit" name="difficulty" value="gen" class="button primary">Start Gen</button>' : `<button type="submit" name="difficulty" value="hard" class="button primary">Hard</button><button type="submit" name="difficulty" value="easy" class="button primary" title="Create an easy task (Ctrl+Enter)">Easy</button><button type="submit" name="difficulty" value="gen" class="button primary" title="Research and create Future tasks without implementing changes">Gen</button>`}</div><p class="form-error" id="form-error" role="alert"></p></form>`, false, true);
+  bindBlockerProject();
   const attachments = attachFiles($('#task-instructions'));
   formSubmit(async (f, button) => { const difficulty = preset ? 'gen' : button?.value || 'easy'; const model = data.settings[`${difficulty}_model`] || ''; await api({action:'create_task',...Object.fromEntries(f),difficulty,model,status,attachments:await attachments.upload()}); });
   $('#modal-form').onkeydown=e=>{if(e.key==='Enter'&&(e.ctrlKey||e.metaKey)){e.preventDefault();e.currentTarget.requestSubmit($(preset ? 'button[value="gen"]' : 'button[value="easy"]', e.currentTarget));}};
 }
-function blockerOptions(current = null) {
+function bindBlockerProject() {
+  const projectSelect = $('#modal-form [name="project_id"]');
+  const blockerSelect = $('#modal-form [name="blocker_id"]');
+  projectSelect.onchange = () => { blockerSelect.innerHTML = blockerOptions(null, projectSelect.value); };
+  projectSelect.onchange();
+}
+function blockerOptions(current = null, selectedProject = current?.project_id) {
   const candidates = (data.tasks || []).filter(t => {
+    if (t.project_id !== selectedProject) return false;
     let next = t;
     const seen = new Set();
     while (next) {
