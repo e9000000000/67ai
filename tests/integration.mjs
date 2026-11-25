@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, rename } from 'node:fs/promises';
 import path from 'node:path';
 import assert from 'node:assert/strict';
 import http from 'node:http';
@@ -21,7 +21,7 @@ async function until(predicate, timeout=15000) {
   const start=Date.now();while(Date.now()-start<timeout){const d=await state();if(predicate(d))return d;await delay(100);}throw Error('Timed out waiting for state');
 }
 async function start() {
-  server=spawn(path.resolve('target/debug/taskdesk.exe'),[],{env:{...process.env,TASKDESK_PORT:'3031',TASKDESK_DATA_DIR:root,TASKDESK_CODEX:fake},windowsHide:true,stdio:['ignore','pipe','pipe']});
+  server=spawn(path.resolve('target/debug/67ai.exe'),[],{env:{...process.env,'67AI_PORT':'3031','67AI_DATA_DIR':root,'67AI_CODEX':fake},windowsHide:true,stdio:['ignore','pipe','pipe']});
   server.stderr.on('data',b=>process.stderr.write(b));
   for(let i=0;i<50;i++){try{await state();return;}catch{await delay(100);}}throw Error('Server failed to start');
 }
@@ -34,7 +34,7 @@ try {
   const page = await fetch(url);
   const imageSources = page.headers.get('content-security-policy').split(';').map(s=>s.trim().split(/\s+/)).find(s=>s[0]==='img-src');
   assert(imageSources.includes('blob:'), 'Local attachment previews need blob: image URLs');
-  const duplicate=spawnSync(path.resolve('target/debug/taskdesk.exe'),[],{env:{...process.env,TASKDESK_PORT:'3033',TASKDESK_DATA_DIR:root},windowsHide:true,encoding:'utf8',timeout:3000});
+  const duplicate=spawnSync(path.resolve('target/debug/67ai.exe'),[],{env:{...process.env,'67AI_PORT':'3033','67AI_DATA_DIR':root},windowsHide:true,encoding:'utf8',timeout:3000});
   assert.equal(duplicate.status,1);assert.match(duplicate.stderr,/already open/);
   let d=await state();const settings={...d.settings,hard_model:'hard-test-model',easy_model:'easy-test-model',paused:true};await action({action:'settings',...settings});
   const projectA=path.join(root,'project-a'), projectB=path.join(root,'project-b');
@@ -89,7 +89,7 @@ try {
   const download = await fetch(`${url}/api/attachments/${picture.id}`);
   assert.equal(download.headers.get('content-type'),'image/png');
   assert.deepEqual(Buffer.from(await download.arrayBuffer()),png);
-  await action({action:'send_message',id:future,text:'',attachments:['../../taskdesk.json']},400);
+  await action({action:'send_message',id:future,text:'',attachments:['../../67ai.json']},400);
   const attached = (await action({action:'create_task',project_id:a,title:'Attachments',text:'',model:'',status:'todo',attachments:[picture.id,document.id]})).id;
   await until(d=>d.tasks.find(t=>t.id===attached).status==='done');
   let attachedArgs = await readFile(path.join(projectA,'last-args.json'),'utf8');
@@ -181,12 +181,16 @@ try {
   await action({action:'approve_task',id:attached});
   await action({action:'approve_task',id:second});
   await stop();
-  const saved=JSON.parse(await readFile(path.join(root,'taskdesk.json'),'utf8'));
+  const saved=JSON.parse(await readFile(path.join(root,'67ai.json'),'utf8'));
   saved.tasks.find(t=>t.id===attached).cleanup_at=Date.now()-1;
   saved.tasks.find(t=>t.id===second).cleanup_at=Date.now()-1;
   saved.tasks.find(t=>t.id===second).thread_id='fail-delete';
-  await writeFile(path.join(root,'taskdesk.json'),JSON.stringify(saved));
+  await writeFile(path.join(root,'67ai.json'),JSON.stringify(saved));
+  await rename(path.join(root,'67ai.json'),path.join(root,'taskdesk.json'));
+  await writeFile(path.join(root,'taskdesk.lock'),'');
   await start();
+  await assert.rejects(readFile(path.join(root,'taskdesk.json')), {code:'ENOENT'});
+  assert.ok(JSON.parse(await readFile(path.join(root,'67ai.json'),'utf8')).tasks.length);
   d=await until(d=>!d.tasks.some(t=>t.id===attached)&&d.tasks.find(t=>t.id===second).error);
   assert.match(d.tasks.find(t=>t.id===second).error,/Cleanup failed/);
   assert.equal(d.tasks.find(t=>t.id===second).cleanup_at,null);

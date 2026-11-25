@@ -92,7 +92,7 @@ fn codex_home() -> PathBuf {
     })
 }
 fn detect_codex() -> String {
-    if let Ok(p) = std::env::var("TASKDESK_CODEX") { return p; }
+    if let Ok(p) = std::env::var("67AI_CODEX") { return p; }
     if cfg!(windows) {
         if let Some(roaming) = std::env::var_os("APPDATA") {
             let base = PathBuf::from(roaming).join("npm/node_modules/@openai/codex/node_modules/@openai");
@@ -387,7 +387,7 @@ async fn run_codex(app: &App, task: &Task, project: &Project, settings: &Setting
     let prompt = parts.join("\n\n");
     let mut prompt = format!("Task: {}\n\n{}", task.title, prompt);
     if task.worktree.is_some() {
-        prompt.push_str("\n\nWork only in this task's Git worktree and on its existing taskdesk branch. Do not switch branches, merge into main, or modify other worktrees. Commit completed changes here; Taskdesk will merge them into main separately.");
+        prompt.push_str("\n\nWork only in this task's Git worktree and on its existing 67ai branch. Do not switch branches, merge into main, or modify other worktrees. Commit completed changes here; 67ai will merge them into main separately.");
     }
     let mut command = Command::new(&settings.codex_path);
     command.arg("exec");
@@ -497,12 +497,13 @@ async fn prepare_worktree(app: &App, task: &mut Task, project: &mut Project, set
         task.worktree = Some(path); task.thread_id = None; task.sent_count = 0;
     }
     if let Some(path) = &task.worktree {
-        let branch = format!("taskdesk/{}", task.id);
+        let branch = format!("67ai/{}", task.id);
         if !std::path::Path::new(path).exists() {
             require_main(project).await?;
             git(&project.path, &["worktree", "add", "-b", &branch, path, "main"]).await?;
         }
-        if git(path, &["branch", "--show-current"]).await? != branch { return Err("Task worktree is on an unexpected branch.".into()); }
+        let current_branch = git(path, &["branch", "--show-current"]).await?;
+        if current_branch != branch && current_branch != format!("taskdesk/{}", task.id) { return Err("Task worktree is on an unexpected branch.".into()); }
         project.path = path.clone();
     }
     Ok(())
@@ -510,8 +511,8 @@ async fn prepare_worktree(app: &App, task: &mut Task, project: &mut Project, set
 async fn merge_task(task: &Task, project: &Project) -> Result<(), String> {
     let path = task.worktree.as_deref().ok_or("Missing task worktree")?;
     require_main(project).await?;
-    let branch = format!("taskdesk/{}", task.id);
-    if git(path, &["branch", "--show-current"]).await? != branch { return Err("Task worktree is on an unexpected branch.".into()); }
+    let branch = git(path, &["branch", "--show-current"]).await?;
+    if branch != format!("67ai/{}", task.id) && branch != format!("taskdesk/{}", task.id) { return Err("Task worktree is on an unexpected branch.".into()); }
     git(path, &["add", "--all"]).await?;
     if !git(path, &["diff", "--cached", "--name-only"]).await?.is_empty() {
         git(path, &["commit", "-m", &format!("Complete task: {}", task.title)]).await?;
@@ -638,7 +639,7 @@ async fn codex_request(executable: &str, method: &str, params: Value) -> Result<
     let mut output = BufReader::new(child.stdout.take().unwrap()).lines();
     let result = tokio::time::timeout(std::time::Duration::from_secs(30), async {
         for request in [
-            json!({"id":1,"method":"initialize","params":{"clientInfo":{"name":"taskdesk","version":"0.1.0"},"capabilities":null}}),
+            json!({"id":1,"method":"initialize","params":{"clientInfo":{"name":"67ai","version":"0.1.0"},"capabilities":null}}),
             json!({"id":2,"method":method,"params":params}),
         ] {
             input.write_all(format!("{request}\n").as_bytes()).await.map_err(|e| e.to_string())?;
@@ -700,18 +701,28 @@ async fn cleanup_worker(app: App, mut shutdown: watch::Receiver<bool>) {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let port = std::env::var("TASKDESK_PORT").unwrap_or_else(|_| "3030".into()).parse::<u16>()?;
+    let port = std::env::var("67AI_PORT").unwrap_or_else(|_| "3030".into()).parse::<u16>()?;
     // Bind before loading state: a second launch must not recover another server's running tasks.
     let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).await?;
-    let dir = match std::env::var_os("TASKDESK_DATA_DIR") {
+    let dir = match std::env::var_os("67AI_DATA_DIR") {
         Some(dir) => PathBuf::from(dir),
         None => std::env::current_dir()?.join("data"),
     };
     std::fs::create_dir_all(&dir)?;
-    let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join("taskdesk.lock"))?;
-    lock.try_lock().map_err(|_| "This Taskdesk data directory is already open in another server")?;
+    let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join("67ai.lock"))?;
+    lock.try_lock().map_err(|_| "This 67ai data directory is already open in another server")?;
     std::fs::write(dir.join("response-schema.json"), include_str!("response-schema.json"))?;
-    let file = dir.join("taskdesk.json");
+    let file = dir.join("67ai.json");
+    // Keep the previous installation locked while migrating its saved board.
+    let legacy_lock = if dir.join("taskdesk.lock").exists() {
+        let lock = std::fs::OpenOptions::new().write(true).open(dir.join("taskdesk.lock"))?;
+        lock.try_lock().map_err(|_| "Stop the previous server before starting 67ai")?;
+        Some(lock)
+    } else { None };
+    if !file.exists() && dir.join("taskdesk.json").exists() {
+        std::fs::rename(dir.join("taskdesk.json"), &file)?;
+    }
+    let _legacy_lock = legacy_lock;
     let mut data: Data = if file.exists() { serde_json::from_slice(&std::fs::read(&file)?)? } else { initial_data() };
     for t in &mut data.tasks {
         t.merging = false;
@@ -738,7 +749,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/attachments/{id}", get(attachment))
         .layer(axum::extract::DefaultBodyLimit::max(2 * 1024 * 1024))
         .layer(axum::middleware::from_fn(local_only)).with_state(app);
-    println!("Taskdesk running at http://127.0.0.1:{port}");
+    println!("67ai running at http://127.0.0.1:{port}");
     axum::serve(listener, router).with_graceful_shutdown(async move { let _ = tokio::signal::ctrl_c().await; let _ = stop.send(true); }).await?;
     let _ = worker.await;
     let _ = merger.await;
@@ -757,7 +768,7 @@ mod tests {
         d.settings.paused = true;
         d.settings.codex_path = dir.join("missing-codex.exe").to_string_lossy().into();
         let t = task("done", 0); let key = t.id.clone(); d.tasks.push(t);
-        let app = Arc::new(Mutex::new(Store { data: d, file: dir.join("taskdesk.json") }));
+        let app = Arc::new(Mutex::new(Store { data: d, file: dir.join("67ai.json") }));
         let _ = action(State(app.clone()), Json(Action::ApproveTask { id: key.clone() })).await.unwrap();
         let deadline = app.lock().await.data.tasks[0].cleanup_at.unwrap();
         assert!(deadline > now() + 1_790_000);
@@ -804,15 +815,15 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let mut data = initial_data();
         data.projects.push(Project { id: "p".into(), name: "Test".into(), path: dir.to_string_lossy().into() });
-        let app = Arc::new(Mutex::new(Store { data, file: dir.join("taskdesk.json") }));
+        let app = Arc::new(Mutex::new(Store { data, file: dir.join("67ai.json") }));
         let Json(uploaded) = upload(State(app.clone()), axum::extract::Query(Upload { name: "notes.txt".into(), media_type: "text/plain".into() }), axum::body::Bytes::from_static(b"file contents")).await.unwrap();
         let key = uploaded["id"].as_str().unwrap().to_string();
         let Json(created) = action(State(app.clone()), Json(Action::CreateTask { project_id: "p".into(), title: "Files".into(), text: "".into(), model: "".into(), status: "future".into(), attachments: vec![key.clone()] })).await.unwrap();
         let task_id = created["id"].as_str().unwrap().to_string();
         let _ = action(State(app.clone()), Json(Action::SendMessage { id: task_id.clone(), text: "".into(), attachments: vec![key.clone()] })).await.unwrap();
         assert!(action(State(app.clone()), Json(Action::SendMessage { id: task_id.clone(), text: "".into(), attachments: vec![] })).await.is_err());
-        assert!(action(State(app.clone()), Json(Action::SendMessage { id: task_id, text: "bad".into(), attachments: vec!["../taskdesk.json".into()] })).await.is_err());
-        let saved: Data = serde_json::from_slice(&std::fs::read(dir.join("taskdesk.json")).unwrap()).unwrap();
+        assert!(action(State(app.clone()), Json(Action::SendMessage { id: task_id, text: "bad".into(), attachments: vec!["../67ai.json".into()] })).await.is_err());
+        let saved: Data = serde_json::from_slice(&std::fs::read(dir.join("67ai.json")).unwrap()).unwrap();
         assert_eq!(saved.tasks[0].messages.len(), 2);
         assert_eq!(saved.tasks[0].messages[0].attachments[0].name, "notes.txt");
         assert_eq!(saved.tasks[0].messages[1].attachments[0].id, key);

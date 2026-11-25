@@ -58,7 +58,7 @@ async function until(predicate) {
   throw Error(`Timed out: ${JSON.stringify(await state())}`);
 }
 async function start() {
-  server=spawn(path.resolve('target/debug/taskdesk.exe'), [], {env:{...process.env,TASKDESK_PORT:'3034',TASKDESK_DATA_DIR:root,TASKDESK_CODEX:fake},windowsHide:true,stdio:['ignore','ignore','pipe']});
+  server=spawn(path.resolve('target/debug/67ai.exe'), [], {env:{...process.env,'67AI_PORT':'3034','67AI_DATA_DIR':root,'67AI_CODEX':fake},windowsHide:true,stdio:['ignore','ignore','pipe']});
   server.stderr.on('data', b=>process.stderr.write(b));
   for(let i=0;i<50;i++) { try { await state(); return; } catch { await delay(100); } }
   throw Error('Server did not start');

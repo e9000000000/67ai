@@ -12,7 +12,7 @@ fn main() {
                 if line.contains("fail-delete") {
                     println!(r#"{{"id":2,"error":{{"message":"Deletion failed"}}}}"#);
                 } else {
-                    let dir = std::env::var("TASKDESK_DATA_DIR").unwrap();
+                    let dir = std::env::var("67AI_DATA_DIR").unwrap();
                     std::fs::write(std::path::Path::new(&dir).join("deleted-session.json"), line).unwrap();
                     println!(r#"{{"id":2,"result":{{}}}}"#);
                 }
