@@ -4,7 +4,7 @@ import path from 'node:path';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 
-const root = path.resolve('test-results', `integration-${Date.now()}`);
+const root = path.resolve('tmp', `integration-${Date.now()}`);
 await mkdir(root, {recursive:true});
 const fake = path.join(root, 'fake-codex.exe');
 const compile = spawnSync('rustc', ['tests/fake_codex.rs', '-o', fake], {stdio:'inherit', windowsHide:true});
@@ -99,8 +99,30 @@ try {
   assert(attachedArgs.includes('resume'));assert(attachedArgs.includes('--image'));
   assert(!attachedArgs.includes(document.id));
   const failed=await create(a,'FAIL_TEST');d=await until(d=>!!d.tasks.find(t=>t.id===failed).error);
-  assert.equal(d.tasks.find(t=>t.id===failed).status,'todo');await delay(800);
+  assert.equal(d.tasks.find(t=>t.id===failed).status,'done');
+  assert.equal(d.tasks.find(t=>t.id===failed).attention,'failed');await delay(800);
   assert.equal((await state()).tasks.find(t=>t.id===failed).messages.filter(m=>m.text==='Codex started working.').length,1);
+  for (const [marker, outcome] of [['QUESTION_TEST','question'],['BLOCKED_TEST','blocked'],['REFUSED_TEST','refused'],['UNSTRUCTURED_TEST','unconfirmed']]) {
+    const key=await create(a,marker);
+    d=await until(d=>d.tasks.find(t=>t.id===key).status==='done');
+    const unfinished=d.tasks.find(t=>t.id===key);
+    assert.equal(unfinished.attention,outcome);
+    assert(!unfinished.messages.some(m=>m.role==='assistant' && m.text.includes('"outcome"')));
+    await action({action:'approve_task',id:key},400);
+    await stop();await start();
+    assert.equal((await state()).tasks.find(t=>t.id===key).attention,outcome);
+    await action({action:'settings',...settings,paused:true});
+    await action({action:'send_message',id:key,text:'ANSWER_TEST: use the first option'});
+    d=await state();assert.equal(d.tasks.find(t=>t.id===key).status,'todo');
+    assert.equal(d.tasks.find(t=>t.id===key).attention,null);
+    // The malformed-output scenario keeps returning malformed output, so rename before retry.
+    if(outcome==='unconfirmed')await action({action:'edit_task',id:key,title:'Answered',model:'test-model'});
+    await action({action:'settings',...settings,paused:false});
+    d=await until(d=>d.tasks.find(t=>t.id===key).status==='done');
+    assert.equal(d.tasks.find(t=>t.id===key).attention,null);
+    assert.equal(d.tasks.find(t=>t.id===key).thread_id,unfinished.thread_id);
+    assert((await readFile(path.join(projectA,'last-args.json'),'utf8')).includes('resume'));
+  }
   const waiting=await create(a,'WAIT_TEST');await until(d=>d.tasks.find(t=>t.id===waiting).status==='now');
   await action({action:'move_task',id:waiting,status:'done'},400);
   await action({action:'stop_task',id:waiting});d=await until(d=>d.tasks.find(t=>t.id===waiting).status==='future');

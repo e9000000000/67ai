@@ -4,6 +4,8 @@ let data, models = [], projectId = '', selectedTask = '', lastBoard = '', lastMe
 const states = ['future', 'todo', 'now', 'done'];
 const project = key => data.projects.find(p => p.id === key);
 const task = key => data.tasks.find(t => t.id === key);
+const needsAttention = t => t.status === 'done' && !!(t.attention || t.error);
+const attentionLabel = t => ({question:'Question — answer needed',blocked:'Blocked — needs your input',refused:'Refused — needs your input',failed:'Run failed',unconfirmed:'Completion not confirmed'}[t.attention] || 'Needs attention');
 const duration = ms => { const seconds = Math.max(0, Math.floor(ms / 1000)); return seconds >= 3600 ? `${Math.floor(seconds/3600)}h ${Math.floor(seconds%3600/60)}m` : seconds >= 60 ? `${Math.floor(seconds/60)}m ${seconds%60}s` : `${seconds}s`; };
 const cleanupLabel = t => `Approved - cleanup in ${duration(t.cleanup_at-Date.now()-serverOffset)}`;
 const elapsed = t => t.elapsed_ms + (t.started_at ? Math.max(0, Date.now()+serverOffset-t.started_at) : 0);
@@ -14,7 +16,7 @@ async function refresh() {
   const res = await fetch('/api/state'); if (!res.ok) throw Error(await res.text());
   const result = await res.json(); data = result.data; models = result.models; serverOffset = result.server_time-Date.now();
   disconnected = false;
-  document.title = `67ai-${data.tasks.filter(t => t.status === 'todo').length}-${data.tasks.filter(t => t.status === 'now').length}`;
+  document.title = data.tasks.some(needsAttention) ? 'QUESTION' : `67ai-${data.tasks.filter(t => t.status === 'todo').length}-${data.tasks.filter(t => t.status === 'now').length}`;
   renderBoard(); if (selectedTask) refreshPanel();
 }
 function modelOptions(value = '', withDefault = true) {
@@ -32,7 +34,7 @@ function renderBoard() {
   }).join('');
 }
 function card(t) {
-  return `<button class="task-card ${t.status==='now'?'running':''}" data-task="${t.id}" draggable="${t.status!=='now'}"><h3>${escape(t.title)}</h3>${t.cleanup_at ? `<span class="approval-countdown" data-cleanup="${t.id}">${cleanupLabel(t)}</span>` : ''}<span class="card-meta">${!projectId ? '<span>'+escape(project(t.project_id)?.name)+'</span>' : ''}${t.error ? '<span class="card-error">Needs attention</span>' : ''}<span data-timer="${t.id}">${duration(elapsed(t))}</span></span></button>`;
+  return `<button class="task-card ${t.status==='now'?'running':''} ${needsAttention(t)?'needs-attention':''}" data-task="${t.id}" draggable="${t.status!=='now'}"><h3>${escape(t.title)}</h3>${t.cleanup_at ? `<span class="approval-countdown" data-cleanup="${t.id}">${cleanupLabel(t)}</span>` : ''}<span class="card-meta">${!projectId ? '<span>'+escape(project(t.project_id)?.name)+'</span>' : ''}${needsAttention(t)||t.error ? `<span class="card-error">${escape(attentionLabel(t))}</span>` : ''}<span data-timer="${t.id}">${duration(elapsed(t))}</span></span></button>`;
 }
 function modal(title, body, wide = false, fullscreen = false) {
   const dialog = $('#dialog'); dialog.classList.toggle('wide', wide); dialog.classList.toggle('fullscreen', fullscreen);
@@ -129,12 +131,13 @@ function openTask(key) {
   $('#revive-task').onclick=()=>act({action:'revive_task',id:key});
   $('#stop-task').onclick=()=>act({action:'stop_task',id:key});
   const attachments = attachFiles($('#message-input'));
+  $('#message-form').insertAdjacentHTML('beforeend','<button type="submit" id="send-message" class="button primary small">Send message</button>');
   $('#task-panel').clearAttachments = attachments.clear;
   let sending = false;
   $('#message-form').onsubmit=async e=>{
     e.preventDefault();if(sending)return;const input=$('#message-input');const text=input.value;
-    sending=true;input.readOnly=true;
-    try{await api({action:'send_message',id:key,text,attachments:await attachments.upload()});input.value='';attachments.clear();$('#messages').scrollTop=$('#messages').scrollHeight;}catch(err){toast(err.message);}finally{sending=false;input.readOnly=false;}
+    sending=true;input.readOnly=true;$('#send-message').disabled=true;
+    try{await api({action:'send_message',id:key,text,attachments:await attachments.upload()});input.value='';attachments.clear();$('#messages').scrollTop=$('#messages').scrollHeight;}catch(err){toast(err.message);}finally{sending=false;input.readOnly=false;const button=$('#send-message');if(button)button.disabled=false;}
   };
   $('#message-input').onkeydown=e=>{if(e.key==='Enter'&&(e.ctrlKey||e.metaKey)){e.preventDefault();$('#message-form').requestSubmit();}};
   refreshPanel();
@@ -146,12 +149,15 @@ function refreshPanel() {
   $('#task-model').disabled=t.status==='now';$('#task-model').value=t.model;
   $('#edit-task').disabled=t.status==='now';$('#delete-task').disabled=t.status==='now';
   $('#stop-task').hidden=t.status!=='now';$('#stop-task').disabled=t.cancel;$('#stop-task').textContent=t.cancel?'Stopping…':'Stop';
-  $('#approve-task').hidden=t.status!=='done'||!!t.cleanup_at;
+  $('#approve-task').hidden=t.status!=='done'||!!t.cleanup_at||!!t.attention;
   $('#revive-task').hidden=t.status!=='done'||!t.cleanup_at;
-  const signature=JSON.stringify([t.messages,t.error]);if(signature===lastMessages)return;lastMessages=signature;
+  $('#send-message').textContent=needsAttention(t)?'Send answer & continue':'Send message';
+  $('#message-input').placeholder=needsAttention(t)?'Type your answer or instructions to continue…':'Add details or ask Codex to continue…';
+  $('#panel-title').classList.toggle('card-error',needsAttention(t));
+  const signature=JSON.stringify([t.messages,t.error,t.attention,t.status]);if(signature===lastMessages)return;lastMessages=signature;
   const messages=$('#messages');const atBottom=messages.scrollHeight-messages.scrollTop-messages.clientHeight<90||!messages.innerHTML;
   const opened=[...messages.querySelectorAll('details[open]')].map(el=>el.dataset.index);
-  messages.innerHTML=(t.error?`<div class="run-error">${escape(t.error)}${t.status!=='now'?'<div><button id="retry-task" class="button small">Retry in queue</button></div>':''}</div>`:'')+t.messages.map((m,i)=>{
+  messages.innerHTML=(needsAttention(t)&&!t.error?`<div class="run-error" role="status">${escape(attentionLabel(t))}. This task is unfinished. Reply below to continue.</div>`:'')+(t.error?`<div class="run-error">${escape(t.error)}${t.status!=='now'?'<div><button id="retry-task" class="button small">Retry in queue</button></div>':''}</div>`:'')+t.messages.map((m,i)=>{
     if(m.role==='system')return `<div class="message system">${escape(m.text)}</div>`;
     if(m.role==='activity')return `<div class="message activity"><details data-index="${i}" ${opened.includes(String(i))?'open':''}><summary>${escape(m.text.split('\n')[0].slice(0,140))}</summary><pre>${escape(m.text)}</pre></details></div>`;
     return `<article class="message ${m.role}"><div class="message-label">${m.role==='user'?'You':'◈ Codex'}<time>${new Date(m.at).toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit'})}</time></div><div class="message-body">${escape(m.text)}</div><div class="attachment-list">${(m.attachments||[]).map(f=>`<a class="attachment-chip" href="/api/attachments/${encodeURIComponent(f.id)}" download="${escape(f.name)}">${attachmentMarkup(f, `/api/attachments/${encodeURIComponent(f.id)}`)}</a>`).join('')}</div></article>`;

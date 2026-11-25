@@ -1,0 +1,16 @@
+{
+  "type": "object",
+  "properties": {
+    "outcome": {
+      "type": "string",
+      "enum": ["completed", "question", "blocked", "refused"],
+      "description": "Use completed only when the requested work is finished. Use question when you need the user's answer, choice, confirmation, or permission; blocked when work remains but cannot proceed; refused when declining the request."
+    },
+    "message": {
+      "type": "string",
+      "description": "Your full user-facing reply, including any questions, choices, blockers, or reasons for refusal. The user can reply to continue this conversation."
+    }
+  },
+  "required": ["outcome", "message"],
+  "additionalProperties": false
+}

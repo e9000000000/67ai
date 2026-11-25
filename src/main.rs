@@ -59,6 +59,7 @@ struct Task {
     started_at: Option<u64>, thread_id: Option<String>, error: Option<String>,
     sent_count: usize, cancel: bool,
     #[serde(default)] cleanup_at: Option<u64>,
+    #[serde(default)] attention: Option<String>,
 }
 impl Task {
     fn message(&mut self, role: &str, text: impl Into<String>) { self.messages.push(Message { role: role.into(), text: text.into(), at: now(), attachments: vec![] }); }
@@ -175,7 +176,7 @@ async fn action(State(app): State<App>, Json(action): Json<Action>) -> ApiResult
             nonempty(&title, "Title")?; if attachments.is_empty() { nonempty(&text, "Task instructions")?; } valid_status(&status)?;
             if status == "done" { return Err(bad("New tasks must start in future or todo")); }
             if !d.projects.iter().any(|p| p.id == project_id) { return Err(bad("Project not found")); }
-            let mut task = Task { id: id(), project_id, title: title.trim().into(), model, status, messages: vec![], created_at: now(), queued_at: now(), elapsed_ms: 0, started_at: None, thread_id: None, error: None, sent_count: 0, cancel: false, cleanup_at: None };
+            let mut task = Task { id: id(), project_id, title: title.trim().into(), model, status, messages: vec![], created_at: now(), queued_at: now(), elapsed_ms: 0, started_at: None, thread_id: None, error: None, sent_count: 0, cancel: false, cleanup_at: None, attention: None };
             task.message("user", text.trim()); task.messages.last_mut().unwrap().attachments = attachments;
             result = json!({"id": task.id}); d.tasks.push(task);
         }
@@ -190,7 +191,7 @@ async fn action(State(app): State<App>, Json(action): Json<Action>) -> ApiResult
                 if t.sent_count >= t.messages.len() || !t.messages[t.sent_count..].iter().any(|m| m.role == "user") {
                     t.message("user", "Continue this task. Check the current work and complete any remaining steps, then report the result.");
                 }
-                t.queued_at = now(); t.error = None; t.cancel = false;
+                t.queued_at = now(); t.error = None; t.cancel = false; t.attention = None;
             }
             t.status = status;
         }
@@ -201,7 +202,7 @@ async fn action(State(app): State<App>, Json(action): Json<Action>) -> ApiResult
             t.messages.last_mut().unwrap().attachments = attachments;
             t.cleanup_at = None;
             if t.status == "done" { t.status = "todo".into(); t.queued_at = now(); }
-            t.error = None;
+            t.error = None; if t.status != "now" { t.attention = None; }
         }
         Action::StopTask { id } => {
             let t = task_mut(&mut d, &id)?;
@@ -211,6 +212,7 @@ async fn action(State(app): State<App>, Json(action): Json<Action>) -> ApiResult
         Action::ApproveTask { id } => {
             let t = task_mut(&mut d, &id)?;
             if t.status != "done" { return Err(bad("Only done tasks can be approved")); }
+            if t.attention.is_some() { return Err(bad("Answer or retry this unfinished task before approving it")); }
             if t.cleanup_at.is_none() { t.cleanup_at = Some(now() + 30 * 60 * 1000); }
             t.error = None;
         }
@@ -294,7 +296,19 @@ fn event(task: &mut Task, value: &Value) -> bool {
         "item.completed" => {
             let item = &value["item"];
             match item["type"].as_str().unwrap_or("") {
-                "agent_message" => if let Some(text) = item["text"].as_str() { task.message("assistant", text); },
+                "agent_message" => if let Some(text) = item["text"].as_str() {
+                    if let Ok(reply) = serde_json::from_str::<Value>(text) {
+                        if let (Some(outcome), Some(message)) = (reply["outcome"].as_str(), reply["message"].as_str()) {
+                            if matches!(outcome, "completed" | "question" | "blocked" | "refused") && !message.trim().is_empty() {
+                                task.attention = if outcome == "completed" { None } else { Some(outcome.into()) };
+                                task.message("assistant", message);
+                                return true;
+                            }
+                        }
+                    }
+                    task.attention = Some("unconfirmed".into());
+                    task.message("assistant", text);
+                },
                 "command_execution" => {
                     let command = item["command"].as_str().unwrap_or("Command");
                     let output: String = item["aggregated_output"].as_str().unwrap_or("").chars().take(12000).collect();
@@ -343,6 +357,8 @@ impl Drop for ProcessJob { fn drop(&mut self) { unsafe { windows_sys::Win32::Fou
 async fn run_codex(app: &App, task: &Task, project: &Project, settings: &Settings, shutdown: &mut watch::Receiver<bool>) -> Result<(), String> {
     let mut images = vec![];
     let store = app.lock().await;
+    let schema = store.file.parent().unwrap().join("response-schema.json");
+    std::fs::write(&schema, include_str!("response-schema.json")).map_err(|e| e.to_string())?;
     let mut parts = vec![];
     for message in task.messages[task.sent_count..].iter().filter(|m| m.role == "user") {
         parts.push(message.text.clone());
@@ -360,6 +376,7 @@ async fn run_codex(app: &App, task: &Task, project: &Project, settings: &Setting
     command.arg("exec");
     if let Some(thread) = &task.thread_id { command.args(["resume", thread]); }
     command.args(["--dangerously-bypass-approvals-and-sandbox", "--json", "--skip-git-repo-check"]);
+    command.arg("--output-schema").arg(&schema);
     let model = if task.model.is_empty() { &settings.default_model } else { &task.model };
     if !model.is_empty() { command.args(["--model", model]); }
     for path in images { command.arg("--image").arg(path); }
@@ -429,6 +446,7 @@ async fn worker(app: App, mut shutdown: watch::Receiver<bool>) {
             let mut d = store.data.clone();
             if let Some(index) = next_task(&d) {
                 let t = &mut d.tasks[index]; t.status = "now".into(); t.started_at = Some(now()); t.cancel = false;
+                t.attention = Some("unconfirmed".into());
                 t.message("system", "Codex started working.");
                 let task = t.clone();
                 let project = d.projects.iter().find(|p| p.id == task.project_id).unwrap().clone();
@@ -447,9 +465,10 @@ async fn worker(app: App, mut shutdown: watch::Receiver<bool>) {
                         let pending = t.messages[t.sent_count..].iter().any(|m| m.role == "user");
                         t.status = if pending { "todo" } else { "done" }.into();
                         t.queued_at = now(); t.error = None;
-                        t.message("system", if pending { "Run completed. Your follow-up is queued." } else { "Run completed." });
+                        if pending { t.attention = None; }
+                        t.message("system", if pending { "Run ended. Your follow-up is queued." } else if t.attention.is_some() { "Task unfinished. Reply below to continue." } else { "Run completed." });
                     }
-                    Err(e) => { t.status = if t.cancel || stopped { "future" } else { "todo" }.into(); t.error = Some(e.clone()); t.message("system", e); }
+                    Err(e) => { t.status = if t.cancel || stopped { "future" } else { "done" }.into(); t.attention = if t.cancel || stopped { None } else { Some("failed".into()) }; t.error = Some(e.clone()); t.message("system", e); }
                 }
                 t.cancel = false;
             }).await { eprintln!("Cannot persist result; worker stopped: {e}"); break; }
@@ -645,7 +664,7 @@ mod tests {
         assert!(old.attachments.is_empty());
     }
     fn task(status: &str, queued_at: u64) -> Task {
-        Task { id: id(), project_id: "p".into(), title: "Test".into(), model: "".into(), status: status.into(), messages: vec![], created_at: 0, queued_at, elapsed_ms: 0, started_at: None, thread_id: None, error: None, sent_count: 0, cancel: false, cleanup_at: None }
+        Task { id: id(), project_id: "p".into(), title: "Test".into(), model: "".into(), status: status.into(), messages: vec![], created_at: 0, queued_at, elapsed_ms: 0, started_at: None, thread_id: None, error: None, sent_count: 0, cancel: false, cleanup_at: None, attention: None }
     }
     #[test]
     fn queue_is_global_fifo_and_never_runs_future_or_parallel() {
@@ -665,5 +684,23 @@ mod tests {
         assert_eq!(t.messages[0].text, "Finished");
         assert!(!event(&mut t, &json!({"type":"turn.failed", "error":{"message":"No access"}})));
         assert_eq!(t.messages[1].text, "No access");
+    }
+    #[test]
+    fn structured_outcomes_keep_questions_separate_from_completion() {
+        let mut t = task("now", 0);
+        for outcome in ["question", "blocked", "refused", "completed"] {
+            let reply = json!({"outcome":outcome,"message":"Reply with your choice?"}).to_string();
+            assert!(event(&mut t, &json!({"type":"item.completed","item":{"type":"agent_message","text":reply}})));
+            assert_eq!(t.attention.as_deref(), if outcome == "completed" { None } else { Some(outcome) });
+            assert_eq!(t.messages.last().unwrap().text, "Reply with your choice?");
+        }
+        t.attention = Some("unconfirmed".into());
+        for text in ["Plain reply", r#"{"outcome":"unknown","message":"hello"}"#, r#"{"outcome":"completed","message":""}"#] {
+            event(&mut t, &json!({"type":"item.completed","item":{"type":"agent_message","text":text}}));
+            assert_eq!(t.attention.as_deref(), Some("unconfirmed"));
+        }
+        let mut old = serde_json::to_value(task("done", 0)).unwrap();
+        old.as_object_mut().unwrap().remove("attention");
+        assert!(serde_json::from_value::<Task>(old).unwrap().attention.is_none());
     }
 }

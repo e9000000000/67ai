@@ -24,6 +24,8 @@ fn main() {
     std::fs::write("last-prompt.txt", &prompt).unwrap();
     let args: Vec<String> = std::env::args().collect();
     assert!(args.iter().any(|a| a == "--dangerously-bypass-approvals-and-sandbox"));
+    let schema_index = args.iter().position(|a| a == "--output-schema").expect("Missing response schema");
+    assert!(std::fs::read_to_string(&args[schema_index + 1]).unwrap().contains("refused"));
     std::fs::write("last-args.json", format!("{args:?}")).unwrap();
     println!(r#"{{"type":"thread.started","thread_id":"11111111-1111-4111-8111-111111111111"}}"#);
     std::io::stdout().flush().unwrap();
@@ -33,6 +35,15 @@ fn main() {
         println!(r#"{{"type":"turn.failed","error":{{"message":"Deliberate test failure"}}}}"#);
         std::process::exit(1);
     }
-    println!(r#"{{"type":"item.completed","item":{{"type":"agent_message","text":"Test response"}}}}"#);
+    let outcome = if prompt.contains("ANSWER_TEST") { "completed" }
+        else if prompt.contains("QUESTION_TEST") { "question" }
+        else if prompt.contains("BLOCKED_TEST") { "blocked" }
+        else if prompt.contains("REFUSED_TEST") { "refused" }
+        else { "completed" };
+    if prompt.contains("UNSTRUCTURED_TEST") {
+        println!(r#"{{"type":"item.completed","item":{{"type":"agent_message","text":"Unexpected plain reply"}}}}"#);
+    } else {
+        println!(r#"{{"type":"item.completed","item":{{"type":"agent_message","text":"{{\"outcome\":\"{outcome}\",\"message\":\"Test response\"}}"}}}}"#);
+    }
     println!(r#"{{"type":"turn.completed","usage":{{}}}}"#);
 }
