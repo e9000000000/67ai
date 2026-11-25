@@ -71,7 +71,7 @@ impl Task {
 struct Template { id: String, name: String, content: String }
 fn default_workers() -> usize { 4 }
 #[derive(Clone, Serialize, Deserialize)]
-struct Settings { default_model: String, #[serde(default)] hard_model: String, #[serde(default)] easy_model: String, codex_path: String, paused: bool, #[serde(default = "default_workers")] max_workers: usize, #[serde(default)] parallelism: bool }
+struct Settings { #[serde(default)] hard_model: String, #[serde(default)] easy_model: String, codex_path: String, paused: bool, #[serde(default = "default_workers")] max_workers: usize, #[serde(default)] parallelism: bool }
 #[derive(Clone, Serialize, Deserialize)]
 struct Data { projects: Vec<Project>, tasks: Vec<Task>, templates: Vec<Template>, settings: Settings, saved_at: u64 }
 struct Store { data: Data, file: PathBuf }
@@ -118,7 +118,7 @@ fn initial_data() -> Data {
     }).unwrap_or_default();
     Data {
         projects: vec![], tasks: vec![], saved_at: now(),
-        settings: Settings { hard_model: model.clone(), easy_model: model.clone(), default_model: model, codex_path: detect_codex(), paused: false, max_workers: 4, parallelism: false },
+        settings: Settings { hard_model: model.clone(), easy_model: model, codex_path: detect_codex(), paused: false, max_workers: 4, parallelism: false },
         templates: vec![
             Template { id: id(), name: "Simple & direct".into(), content: "# Project instructions\n\nUse simple, straightforward code and existing tools. Match the existing style.\nAvoid speculative abstractions and unrelated changes.\nRun relevant checks and report what changed, what passed, and any remaining issues.\nWork sequentially. Do not spawn subagents or delegate work.\n".into() },
             Template { id: id(), name: "Careful maintenance".into(), content: "# Project instructions\n\nRead the surrounding code before editing. Keep changes focused on the task.\nPreserve public interfaces unless the task requires a change.\nAdd a regression test for bug fixes where practical. Run relevant existing tests.\nReport the cause, fix, and validation. Work alone, without subagents.\n".into() },
@@ -145,7 +145,7 @@ enum Action {
     ApproveTask { id: String },
     ReviveTask { id: String },
     RetryMerge { id: String },
-    Settings { default_model: String, #[serde(default)] hard_model: String, #[serde(default)] easy_model: String, codex_path: String, paused: bool, #[serde(default = "default_workers")] max_workers: usize, #[serde(default)] parallelism: bool },
+    Settings { #[serde(default)] hard_model: String, #[serde(default)] easy_model: String, codex_path: String, paused: bool, #[serde(default = "default_workers")] max_workers: usize, #[serde(default)] parallelism: bool },
     SaveTemplate { id: Option<String>, name: String, content: String },
     DeleteTemplate { id: String },
     SaveAgents { project_id: String, content: String, original: String },
@@ -234,10 +234,10 @@ async fn action(State(app): State<App>, Json(action): Json<Action>) -> ApiResult
             let t = task_mut(&mut d, &id)?; idle(t)?;
             t.cleanup_at = None; t.error = None;
         }
-        Action::Settings { default_model, hard_model, easy_model, codex_path, paused, max_workers, parallelism } => {
+        Action::Settings { hard_model, easy_model, codex_path, paused, max_workers, parallelism } => {
             nonempty(&codex_path, "Codex executable")?;
             if max_workers == 0 { return Err(bad("Worker count must be at least 1")); }
-            d.settings = Settings { default_model: default_model.trim().into(), hard_model: hard_model.trim().into(), easy_model: easy_model.trim().into(), codex_path: codex_path.trim().into(), paused, max_workers, parallelism };
+            d.settings = Settings { hard_model: hard_model.trim().into(), easy_model: easy_model.trim().into(), codex_path: codex_path.trim().into(), paused, max_workers, parallelism };
         }
         Action::SaveTemplate { id: key, name, content } => {
             nonempty(&name, "Template name")?;
@@ -394,8 +394,7 @@ async fn run_codex(app: &App, task: &Task, project: &Project, settings: &Setting
     if let Some(thread) = &task.thread_id { command.args(["resume", thread]); }
     command.args(["--dangerously-bypass-approvals-and-sandbox", "--json", "--skip-git-repo-check"]);
     command.arg("--output-schema").arg(&schema);
-    let model = if task.model.is_empty() { &settings.default_model } else { &task.model };
-    if !model.is_empty() { command.args(["--model", model]); }
+    if !task.model.is_empty() { command.args(["--model", &task.model]); }
     for path in images { command.arg("--image").arg(path); }
     command.arg("--");
     command.arg("-").current_dir(&project.path).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
