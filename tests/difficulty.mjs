@@ -22,6 +22,7 @@ const fields = new Map([['title','Task'],['text','Instructions'],['project_id','
 for (const difficulty of ['hard','easy']) {
   await submit(fields, {value:difficulty});
   assert.equal(action.model, `${difficulty}-model`);
+  assert.equal(action.difficulty, difficulty);
   assert.equal(action.status, 'future');
   assert.equal(action.attachments[0], 'attachment');
 }
@@ -50,3 +51,17 @@ assert.match(markup, /Easy task model/);
 assert.doesNotMatch(markup, /default_model|Default model|Use default model/);
 assert.match(markup, /Use Codex configuration/);
 console.log('Task difficulty and model settings checks passed');
+
+context.project = key => context.data.projects.find(p=>p.id===key);
+context.projectSettings('p');
+assert.match(markup, /AI auto approve easy tasks/);
+assert.match(markup, /AI auto approve hard tasks/);
+await submit(new Map([['auto_approve_easy','on']]));
+assert.equal(action.action,'project_settings');
+assert.equal(action.id,'p');
+assert.equal(action.auto_approve_easy,true);
+assert.equal(action.auto_approve_hard,false);
+await submit(new Map([['auto_approve_hard','on']]));
+assert.equal(action.auto_approve_easy,false);
+assert.equal(action.auto_approve_hard,true);
+console.log('Per-project AI approval form checks passed');

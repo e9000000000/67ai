@@ -23,6 +23,24 @@ fn main() {
     }
     let mut prompt = String::new();
     std::io::stdin().read_to_string(&mut prompt).unwrap();
+    if prompt.contains("You are a separate AI reviewer.") {
+        let args: Vec<String> = std::env::args().collect();
+        assert!(!args.iter().any(|a| a == "resume"));
+        assert!(args.windows(2).any(|a| a == ["--model", "hard-review-model"]));
+        assert!(args.windows(2).any(|a| a == ["--sandbox", "read-only"]));
+        println!(r#"{{"type":"thread.started","thread_id":"review-session"}}"#);
+        std::io::stdout().flush().unwrap();
+        std::thread::sleep(Duration::from_millis(900));
+        if prompt.contains("REVIEW_FAIL") { std::process::exit(1); }
+        if prompt.contains("REVIEW_INVALID") {
+            println!(r#"{{"type":"item.completed","item":{{"type":"agent_message","text":"No decision"}}}}"#);
+        } else {
+            let outcome = if prompt.contains("REVIEW_FEEDBACK") { "blocked" } else { "completed" };
+            println!(r#"{{"type":"item.completed","item":{{"type":"agent_message","text":"{{\"outcome\":\"{outcome}\",\"message\":\"Review verdict\"}}"}}}}"#);
+        }
+        println!(r#"{{"type":"turn.completed"}}"#);
+        return;
+    }
     if prompt.contains("PARALLEL_TEST") {
         let title = prompt.lines().next().unwrap().strip_prefix("Task: ").unwrap();
         std::fs::write(format!("{title}.txt"), &prompt).unwrap();

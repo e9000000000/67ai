@@ -36,6 +36,10 @@ Paste images or files with Ctrl+V into task instructions or a follow-up message,
 
 Use Hard or Easy to create a task with the corresponding model from Settings. Ctrl+Enter creates an Easy task or sends a follow-up message. The task header menu contains model selection, AGENTS.md, title editing, deletion, and Stop. Approve appears beside the menu for completed tasks.
 
+**AI approve**, beside Approve, queues an independent review using the current Hard task model and a fresh Codex session. The reviewer reads the full conversation, attachments, and task files with read-only permissions. A verified result starts the same 30-minute approval countdown. Otherwise, its feedback appears as **AI reviewer** and queues the original task in its existing session and model, just like your message. A new message arriving during review discards the verdict. Failed or invalid reviews never approve; use AI approve to retry.
+
+In **Settings**, select a project and open **Project AI approval**. **AI auto approve easy tasks** and **AI auto approve hard tasks** are separate, saved per project, and off by default. Enabled tasks are reviewed after successful completion and any required merge; fixes are reviewed again after the original agent finishes. Reviews share the worker limit, pause, and stop controls. Difficulty is saved when creating a task and stays independent of later model changes. Older tasks without a saved difficulty can still be reviewed manually.
+
 Set the Hard task model and Easy task model in Settings. Both initially use your Codex configuration model. Unset models use Codex configuration. The chosen model is saved on each new task; you can change it in the task menu. Model suggestions are read from Codex's local `models_cache.json`; enter additional model IDs in Settings. Model availability depends on your account. Settings accepts the native Codex executable path; Windows npm installations are detected automatically.
 
 Settings also includes **Maximum task workers** (default **4**, minimum **1**) and **Parallelism allowed** (default **off**, including existing installations). When enabled, tasks from the same or different projects can run concurrently in separate Git worktrees under `data/worktrees`, each on its own `67ai/<task-id>` branch based on `main`. Project folders must be Git repository roots with a clean `main` branch checked out and a configured Git commit identity. Uncommitted main changes are never included in task worktrees.
@@ -50,7 +54,7 @@ Use **Settings → Manage templates** to create, rename, edit, duplicate, or del
 
 Projects, tasks, conversations, templates and settings are stored in `data/67ai.json`, using a temporary file and atomic replacement. Existing installations migrate their previous data file automatically on startup; stop the old server first. Environment overrides now use the `67AI_` prefix. Codex keeps its own thread history in its normal home directory. A file lock prevents two servers from opening the same data directory. Interrupted tasks return to Future on restart rather than silently rerunning; elapsed time is checkpointed every five seconds.
 
-The server binds only to `127.0.0.1` and rejects foreign Host and Origin headers. New and resumed Codex runs use `--dangerously-bypass-approvals-and-sandbox`: no Codex sandbox or approval prompts, with access allowed by the Windows account and any enforced administrator policies. Your configured agent features still apply. On Windows, each run is contained in a kill-on-close job so stopping or exiting the server also terminates child processes. Concurrency is controlled by the parallelism settings.
+The server binds only to `127.0.0.1` and rejects foreign Host and Origin headers. Implementation runs use `--dangerously-bypass-approvals-and-sandbox`: no Codex sandbox or approval prompts, with access allowed by the Windows account and any enforced administrator policies. Your configured agent features still apply. On Windows, each run is contained in a kill-on-close job so stopping or exiting the server also terminates child processes. Concurrency is controlled by the parallelism settings.
 
 Environment overrides:
 
@@ -60,4 +64,4 @@ Environment overrides:
 | `67AI_DATA_DIR` | The working directory's `data` directory |
 | `67AI_CODEX` | Detected native executable; used when creating initial settings |
 
-Run checks with `cargo test`, `node --check web/app.js`, and `cargo build; node tests/integration.mjs; node tests/parallelism.mjs`. The integration suite uses an isolated data directory and a deterministic fake Codex executable; it does not call a model. This checkout pins the installed MSVC Rust toolchain on Windows.
+Run checks with `cargo test`, `node --check web/app.js`, and `cargo build; node tests/integration.mjs; node tests/parallelism.mjs; node tests/ai-approval.mjs`. The integration suite uses an isolated data directory and a deterministic fake Codex executable; it does not call a model. This checkout pins the installed MSVC Rust toolchain on Windows.

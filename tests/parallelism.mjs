@@ -8,12 +8,13 @@ const source = await readFile('web/app.js','utf8');
 let markup, submit, saved;
 const ui = {
   data:{projects:[],settings:{max_workers:4,parallelism:false}}, models:[], projectId:'p',
-  escape:s=>s??'', formEnd:()=>'', templates(){},
+  escape:s=>s??'', formEnd:()=>'', templates(){}, document:{querySelectorAll:()=>[]},
   $:()=>({insertAdjacentHTML(){}}), modal:(title,html)=>{markup=html;},
   formSubmit:handler=>{submit=handler;}, api:value=>{saved=value;},
   duration:()=>'', elapsed:()=>0,
 };
-runInNewContext(source.slice(source.indexOf('function settings(){'), source.indexOf("$('#project-tabs').onclick")),ui);
+runInNewContext(source.slice(source.indexOf('function modelOptions('), source.indexOf('function renderBoard(')),ui);
+runInNewContext(source.slice(source.indexOf('function settingsModel('), source.indexOf("$('#project-tabs').onclick")),ui);
 ui.settings();
 assert.match(markup,/name="max_workers"[^>]*value="4"/);
 assert.doesNotMatch(markup,/name="parallelism"[^>]*checked/);

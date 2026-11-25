@@ -53,7 +53,7 @@ function renderBoard() {
   }).join('');
 }
 function card(t) {
-  return `<button class="task-card ${t.status==='now'?'running':''} ${needsAttention(t)?'needs-attention':''} ${t.awaiting_merge?'awaiting-merge':''}" data-task="${t.id}" draggable="${t.status!=='now'&&!t.awaiting_merge}"><h3>${escape(t.title)}</h3>${t.cleanup_at ? `<span class="approval-countdown" data-cleanup="${t.id}">${cleanupLabel(t)}</span>` : ''}<span class="card-meta">${!projectId ? '<span>'+escape(project(t.project_id)?.name)+'</span>' : ''}${t.awaiting_merge ? `<span>${t.merging?'Merging into main':t.error?'Merge needs attention':'Waiting to merge'}</span>` : ''}${needsAttention(t) ? `<span class="card-error">${escape(attentionLabel(t))}</span>` : ''}<span data-timer="${t.id}">${duration(elapsed(t))}</span></span></button>`;
+  return `<button class="task-card ${t.status==='now'?'running':''} ${needsAttention(t)?'needs-attention':''} ${t.awaiting_merge?'awaiting-merge':''}" data-task="${t.id}" draggable="${t.status!=='now'&&!t.awaiting_merge}"><h3>${escape(t.title)}</h3>${t.cleanup_at ? `<span class="approval-countdown" data-cleanup="${t.id}">${cleanupLabel(t)}</span>` : ''}<span class="card-meta">${!projectId ? '<span>'+escape(project(t.project_id)?.name)+'</span>' : ''}${t.review_pending ? '<span>AI review '+(t.status==='now'?'running':t.error?'interrupted':'queued')+'</span>' : ''}${t.awaiting_merge ? `<span>${t.merging?'Merging into main':t.error?'Merge needs attention':'Waiting to merge'}</span>` : ''}${needsAttention(t) ? `<span class="card-error">${escape(attentionLabel(t))}</span>` : ''}<span data-timer="${t.id}">${duration(elapsed(t))}</span></span></button>`;
 }
 function modal(title, body, wide = false, fullscreen = false) {
   const dialog = $('#dialog'); dialog.classList.toggle('wide', wide); dialog.classList.toggle('fullscreen', fullscreen);
@@ -124,7 +124,7 @@ function newTask(status = 'todo') {
   if (!data.projects.length) { addProject(); toast('Add your first project folder, then create a task.'); return; }
   modal('New task', `<form id="modal-form" class="new-task-form"><label class="field"><span>Title</span><input name="title" placeholder="What should the agent work on?" required autofocus maxlength="200"></label><div class="field instructions-field"><label for="task-instructions">Instructions</label><textarea id="task-instructions" name="text" placeholder="Describe the outcome, relevant details, and how to check the result..." required></textarea></div><div class="new-task-footer"><label class="field"><span>Project</span><select name="project_id">${data.projects.map(p=>`<option value="${p.id}" ${p.id===projectId?'selected':''}>${escape(p.name)}</option>`).join('')}</select></label><button type="submit" name="difficulty" value="hard" class="button primary">Hard</button><button type="submit" name="difficulty" value="easy" class="button primary" title="Create an easy task (Ctrl+Enter)">Easy</button></div><p class="form-error" id="form-error" role="alert"></p></form>`, false, true);
   const attachments = attachFiles($('#task-instructions'));
-  formSubmit(async (f, button) => { const model = data.settings[`${button?.value || 'easy'}_model`] || ''; await api({action:'create_task',...Object.fromEntries(f),model,status,attachments:await attachments.upload()}); });
+  formSubmit(async (f, button) => { const model = data.settings[`${button?.value || 'easy'}_model`] || ''; await api({action:'create_task',...Object.fromEntries(f),model,difficulty:button?.value || 'easy',status,attachments:await attachments.upload()}); });
   $('#modal-form').onkeydown=e=>{if(e.key==='Enter'&&(e.ctrlKey||e.metaKey)){e.preventDefault();e.currentTarget.requestSubmit($('button[value="easy"]', e.currentTarget));}};
 }
 function openTask(key) {
@@ -132,7 +132,7 @@ function openTask(key) {
   selectedTask=key; lastMessages=''; const t=task(key); if(!t) return closeTask();
   $('#overlay').hidden=false; $('#task-panel').hidden=false;
   $('main').inert=true;
-  $('#task-panel').innerHTML=`<div class="panel-header"><h2 id="panel-title"></h2><details class="app-menu task-menu"><summary aria-label="Task menu" title="Task menu"><span class="burger"></span></summary><div class="menu-items"><label class="field"><span>Model</span><select id="task-model" aria-label="Task model">${modelOptions(t.model)}</select></label><button id="task-agents">AGENTS.md</button><button id="edit-task">Edit title</button><button id="delete-task">Delete task</button><button id="stop-task" hidden>Stop</button></div></details><button id="approve-task" class="button primary small" title="Approve and clean up this task and its Codex session in 30 minutes. Project files stay." hidden>Approve</button><button id="revive-task" class="button small" title="Cancel cleanup" hidden>Revive</button><button id="close-task" class="icon-button" aria-label="Close task">×</button></div><div class="messages" id="messages"></div><form class="composer" id="message-form"><textarea id="message-input" placeholder="Add details or ask Codex to continue…" aria-label="Message to Codex" required></textarea></form>`;
+  $('#task-panel').innerHTML=`<div class="panel-header"><h2 id="panel-title"></h2><details class="app-menu task-menu"><summary aria-label="Task menu" title="Task menu"><span class="burger"></span></summary><div class="menu-items"><label class="field"><span>Model</span><select id="task-model" aria-label="Task model">${modelOptions(t.model)}</select></label><button id="task-agents">AGENTS.md</button><button id="edit-task">Edit title</button><button id="delete-task">Delete task</button><button id="stop-task" hidden>Stop</button></div></details><button id="approve-task" class="button primary small" title="Approve and clean up this task and its Codex session in 30 minutes. Project files stay." hidden>Approve</button><button id="ai-approve-task" class="button small" title="Review this result with the Hard model" hidden>AI approve</button><button id="revive-task" class="button small" title="Cancel cleanup" hidden>Revive</button><button id="close-task" class="icon-button" aria-label="Close task">×</button></div><div class="messages" id="messages"></div><form class="composer" id="message-form"><textarea id="message-input" placeholder="Add details or ask Codex to continue…" aria-label="Message to Codex" required></textarea></form>`;
   $('#close-task').onclick=closeTask;
   $('#task-model').onchange=async e=>{await act({action:'edit_task',id:key,title:task(key).title,model:e.target.value});refreshPanel();};
   $('#task-agents').onclick=()=>openAgents(t.project_id);
@@ -147,6 +147,7 @@ function openTask(key) {
   $('#approve-task').onclick=async()=>{
     try{await api({action:'approve_task',id:key});if(selectedTask===key)closeTask();}catch(err){toast(err.message);}
   };
+  $('#ai-approve-task').onclick=()=>act({action:'ai_approve_task',id:key});
   $('#revive-task').onclick=()=>act({action:'revive_task',id:key});
   $('#stop-task').onclick=()=>act({action:'stop_task',id:key});
   const attachments = attachFiles($('#message-input'));
@@ -169,6 +170,7 @@ function refreshPanel() {
   $('#edit-task').disabled=t.status==='now'||t.merging;$('#delete-task').disabled=t.status==='now'||t.awaiting_merge;
   $('#stop-task').hidden=t.status!=='now';$('#stop-task').disabled=t.cancel;$('#stop-task').textContent=t.cancel?'Stopping…':'Stop';
   $('#approve-task').hidden=t.status!=='done'||!!t.cleanup_at||!!t.attention||t.awaiting_merge;
+  $('#ai-approve-task').hidden=t.status!=='done'||!!t.cleanup_at||(!!t.attention&&!t.review_pending)||t.awaiting_merge;
   $('#revive-task').hidden=t.status!=='done'||!t.cleanup_at;
   $('#send-message').textContent=needsAttention(t)?'Send answer & continue':'Send message';
   $('#message-input').placeholder=needsAttention(t)?'Type your answer or instructions to continue…':'Add details or ask Codex to continue…';
@@ -180,9 +182,9 @@ function refreshPanel() {
   messages.innerHTML=(t.awaiting_merge?`<div class="merge-status" role="status">${t.merging?'Merging into main?':'Completed. Waiting to merge into main.'}</div>`:'')+(needsAttention(t)&&!t.error?`<div class="run-error" role="status">${escape(attentionLabel(t))}. This task is unfinished. Reply below to continue.</div>`:'')+(t.error?`<div class="run-error">${escape(t.error)}${t.status!=='now'&&!t.merging?`<div><button id="retry-task" class="button small">${t.awaiting_merge?'Retry merge':'Retry in queue'}</button></div>`:''}</div>`:'')+t.messages.map((m,i)=>{
     if(m.role==='system')return `<div class="message system">${escape(m.text)}</div>`;
     if(m.role==='activity')return `<div class="message activity"><details data-index="${i}" ${opened.includes(String(i))?'open':''}><summary>${escape(m.text.split('\n')[0].slice(0,140))}</summary><pre>${escape(m.text)}</pre></details></div>`;
-    return `<article class="message ${m.role}"><div class="message-label">${m.role==='user'?'You':'◈ Codex'}<time>${new Date(m.at).toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit'})}</time></div><div class="message-body">${escape(m.text)}</div><div class="attachment-list">${(m.attachments||[]).map(f=>`<a class="attachment-chip" href="/api/attachments/${encodeURIComponent(f.id)}" download="${escape(f.name)}">${attachmentMarkup(f, `/api/attachments/${encodeURIComponent(f.id)}`)}</a>`).join('')}</div></article>`;
+    return `<article class="message ${m.role}"><div class="message-label">${m.role==='reviewer'?'AI reviewer':m.role==='user'?'You':'◈ Codex'}<time>${new Date(m.at).toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit'})}</time></div><div class="message-body">${escape(m.text)}</div><div class="attachment-list">${(m.attachments||[]).map(f=>`<a class="attachment-chip" href="/api/attachments/${encodeURIComponent(f.id)}" download="${escape(f.name)}">${attachmentMarkup(f, `/api/attachments/${encodeURIComponent(f.id)}`)}</a>`).join('')}</div></article>`;
   }).join('');
-  if($('#retry-task'))$('#retry-task').onclick=()=>act(t.awaiting_merge?{action:'retry_merge',id:t.id}:{action:'move_task',id:t.id,status:'todo'});
+  if($('#retry-task'))$('#retry-task').onclick=()=>act(t.awaiting_merge?{action:'retry_merge',id:t.id}:t.review_pending&&t.status==='done'?{action:'ai_approve_task',id:t.id}:{action:'move_task',id:t.id,status:'todo'});
   if(atBottom)messages.scrollTop=messages.scrollHeight;
 }
 function closeTask(){$('#task-panel').clearAttachments?.();selectedTask='';$('#task-panel').hidden=true;$('#overlay').hidden=true;$('main').inert=false;}
@@ -219,6 +221,11 @@ function editTemplate(t = {}){
 function settingsModel(name, value, label) {
   return `<label class="field"><span>${label}</span><select data-model-input="${name}"><option value="" ${!value?'selected':''}>Use Codex configuration</option>${modelOptions(value, false)}<option value="__custom__">Custom model ID...</option></select><input name="${name}" value="${escape(value)}" aria-label="${label} custom ID" placeholder="Enter a model ID" hidden></label>`;
 }
+function projectSettings(key){
+  const p=project(key);if(!p)return;
+  modal(`${p.name}: AI approval`,`<form id="modal-form"><p class="help">Automatically review completed tasks with the Hard model. Passing reviews approve the task; feedback is sent to the original agent to continue. Both settings apply only to this project.</p><label class="field"><span>AI auto approve easy tasks</span><input name="auto_approve_easy" type="checkbox" ${p.auto_approve_easy?'checked':''}></label><label class="field"><span>AI auto approve hard tasks</span><input name="auto_approve_hard" type="checkbox" ${p.auto_approve_hard?'checked':''}></label>${formEnd()}`);
+  formSubmit(f=>api({action:'project_settings',id:key,auto_approve_easy:f.has('auto_approve_easy'),auto_approve_hard:f.has('auto_approve_hard')}));
+}
 function settings(){
   modal('Settings',`<label class="field"><span>Project instructions</span><select id="agents-project" aria-label="Project for AGENTS.md">${data.projects.map(p=>`<option value="${p.id}" ${p.id===projectId?'selected':''}>${escape(p.name)}</option>`).join('')}</select></label><button id="settings-agents" class="button small" ${data.projects.length?'':'disabled'}>Edit or create AGENTS.md</button><p class="help">Edit the selected project's file. If it does not exist, create it from a template or write your own instructions.${data.projects.length?'':' Add a project first to create its AGENTS.md.'}</p><div class="settings-actions"><button id="pause-button" class="button small">${data.settings.paused?'Resume queue':'Pause queue'}</button></div><form id="modal-form"><label class="field"><span>Maximum task workers</span><input name="max_workers" type="number" min="1" step="1" value="${data.settings.max_workers ?? 4}" required></label><label class="field"><span>Parallelism allowed</span><input name="parallelism" type="checkbox" ${data.settings.parallelism?'checked':''}></label><p class="help">When enabled, tasks run in separate Git worktrees, up to the worker limit. One additional merge worker merges completed tasks into main, one at a time. The project must have a clean main branch checked out. Orange tasks are waiting to merge. When disabled, tasks run one at a time.</p>${settingsModel('hard_model', data.settings.hard_model, 'Hard task model')}${settingsModel('easy_model', data.settings.easy_model, 'Easy task model')}<p class="help">Hard and Easy create a task with the corresponding model. Choose a model or select Custom model ID.</p><label class="field"><span>Codex executable</span><input name="codex_path" value="${escape(data.settings.codex_path)}" required></label><p class="help">Uses your existing Codex login. On Windows, choose the native codex.exe, not a .cmd or .ps1 launcher.</p><p class="help">Runs use workspace-write permissions with no interactive approval prompts. Codex can edit the project folder. Operations requiring extra permissions report a blocker in the conversation.</p><p class="help">Pause queue stops new task runs and merges; Stop ends only the selected task.</p>${formEnd()}`);
   document.querySelectorAll('[data-model-input]').forEach(select => {
@@ -232,6 +239,8 @@ function settings(){
   $('#settings-agents').onclick=()=>openAgents($('#agents-project').value);
   $('#settings-agents').insertAdjacentHTML('afterend',' <button id="settings-templates" class="button small">Manage templates</button>');
   $('#settings-templates').onclick=templates;
+  $('#settings-agents').insertAdjacentHTML('afterend',` <button id="settings-approval" class="button small" ${data.projects.length?'':'disabled'}>Project AI approval</button>`);
+  $('#settings-approval').onclick=()=>projectSettings($('#agents-project').value);
   $('#pause-button').onclick=async e=>{await act({action:'settings',...data.settings,paused:!data.settings.paused});e.target.textContent=data.settings.paused?'Resume queue':'Pause queue';};
   formSubmit(f=>api({action:'settings',...Object.fromEntries(f),max_workers:Number(f.get('max_workers')),parallelism:f.has('parallelism'),paused:data.settings.paused}));
 }
