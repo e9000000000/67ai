@@ -8,12 +8,13 @@ const source = await readFile('web/app.js','utf8');
 let markup, submit, saved;
 const ui = {
   data:{projects:[],settings:{max_workers:4,parallelism:false}}, models:[], projectId:'p',
-  escape:s=>s??'', formEnd:()=>'', templates(){},
+  escape:s=>s??'', formEnd:()=>'', templates(){}, document:{querySelectorAll:()=>[]},
   $:()=>({insertAdjacentHTML(){}}), modal:(title,html)=>{markup=html;},
   formSubmit:handler=>{submit=handler;}, api:value=>{saved=value;},
   duration:()=>'', elapsed:()=>0,
 };
-runInNewContext(source.slice(source.indexOf('function settings(){'), source.indexOf("$('#project-tabs').onclick")),ui);
+runInNewContext(source.slice(source.indexOf('function modelOptions('), source.indexOf('function renderBoard(')),ui);
+runInNewContext(source.slice(source.indexOf('function settingsModel('), source.indexOf("$('#project-tabs').onclick")),ui);
 ui.settings();
 assert.match(markup,/name="max_workers"[^>]*value="4"/);
 assert.doesNotMatch(markup,/name="parallelism"[^>]*checked/);
@@ -21,7 +22,7 @@ await submit(new Map([['max_workers','3'],['parallelism','on']]));
 assert.equal(saved.max_workers,3); assert.equal(saved.parallelism,true);
 await submit(new Map([['max_workers','1']]));
 assert.equal(saved.parallelism,false);
-runInNewContext(source.slice(source.indexOf('const needsAttention'),source.indexOf('const duration')) + source.slice(source.indexOf('function card('),source.indexOf('function modal(')),ui);
+runInNewContext(source.slice(source.indexOf('const needsAttention'),source.indexOf('const duration')) + source.slice(source.indexOf('function difficultyBadge('),source.indexOf('function modal(')),ui);
 const orange=ui.card({id:'t',title:'Completed',status:'done',awaiting_merge:true,error:'Conflict'});
 assert.match(orange,/awaiting-merge/); assert.match(orange,/Merge needs attention/);
 assert.match(orange,/draggable="false"/); assert.doesNotMatch(orange,/needs-attention/);

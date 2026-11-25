@@ -66,3 +66,17 @@ context.elapsed = ()=>0;
 context.duration = ()=>'0s';
 assert.match(context.card({id:'t',title:'Task',difficulty:'easy',status:'todo'}), /class="task-difficulty easy">Easy</);
 console.log('Task difficulty and model settings checks passed');
+
+context.project = key => context.data.projects.find(p=>p.id===key);
+context.projectSettings('p');
+assert.match(markup, /AI auto approve easy tasks/);
+assert.match(markup, /AI auto approve hard tasks/);
+await submit(new Map([['auto_approve_easy','on']]));
+assert.equal(action.action,'project_settings');
+assert.equal(action.id,'p');
+assert.equal(action.auto_approve_easy,true);
+assert.equal(action.auto_approve_hard,false);
+await submit(new Map([['auto_approve_hard','on']]));
+assert.equal(action.auto_approve_easy,false);
+assert.equal(action.auto_approve_hard,true);
+console.log('Per-project AI approval form checks passed');
