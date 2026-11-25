@@ -23,11 +23,18 @@ fn main() {
     }
     let mut prompt = String::new();
     std::io::stdin().read_to_string(&mut prompt).unwrap();
+    let args: Vec<String> = std::env::args().collect();
+    assert!(args.iter().any(|a| a == "--dangerously-bypass-approvals-and-sandbox"));
+    assert!(!args.iter().any(|a| a == "--sandbox" || a.starts_with("approval_policy=")));
     if prompt.contains("You are a separate AI reviewer.") {
         let args: Vec<String> = std::env::args().collect();
         assert!(!args.iter().any(|a| a == "resume"));
         assert!(args.windows(2).any(|a| a == ["--model", "hard-review-model"]));
-        assert!(args.windows(2).any(|a| a == ["--sandbox", "read-only"]));
+        assert!(prompt.contains("actually exercise the changed program behavior"));
+        assert!(prompt.contains("inspect its rendered appearance"));
+        assert!(prompt.contains("Do not edit implementation files"));
+        assert!(prompt.contains("Report what you tested"));
+        assert!(!prompt.contains("relevant read-only checks"));
         println!(r#"{{"type":"thread.started","thread_id":"review-session"}}"#);
         std::io::stdout().flush().unwrap();
         std::thread::sleep(Duration::from_millis(900));
