@@ -253,6 +253,37 @@ fn queue_auto_reviews(d: &mut Data) {
         if enabled && !t.review_attempted { let _ = queue_review(t); }
     }
 }
+#[cfg(any(windows, test))]
+fn waiting_for_approval(d: &Data) -> usize {
+    let mut count = 0;
+    for t in &d.tasks {
+        if t.status == "future" { continue; }
+        if t.status != "done" || t.awaiting_merge || t.merging || t.review_pending || t.attention.is_some() || t.error.is_some() { return 0; }
+        if t.cleanup_at.is_some() { continue; }
+        let auto_review = !t.review_attempted && d.projects.iter().find(|p| p.id == t.project_id).is_some_and(|p| match t.difficulty {
+            Some(Difficulty::Easy) => p.auto_approve_easy, Some(Difficulty::Hard) => p.auto_approve_hard, _ => false,
+        });
+        if auto_review { return 0; }
+        count += 1;
+    }
+    count
+}
+
+#[cfg(windows)]
+async fn notification_worker(app: App, tray: tray::Tray, mut shutdown: watch::Receiver<bool>) {
+    let mut ready = waiting_for_approval(&app.lock().await.data) > 0;
+    loop {
+        tokio::select! {
+            _ = shutdown.changed() => break,
+            _ = tokio::time::sleep(std::time::Duration::from_millis(400)) => {
+                let count = waiting_for_approval(&app.lock().await.data);
+                if count > 0 && !ready { tray.notify_ready(count); }
+                ready = count > 0;
+            }
+        }
+    }
+}
+
 fn finish_review(t: &mut Task, snapshot: &Task, review: Task) {
     t.review_pending = false;
     // A follow-up sent while review was running supersedes its verdict.
@@ -1118,7 +1149,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app: App = Arc::new(Mutex::new(store));
     let (stop, shutdown) = watch::channel(false);
     #[cfg(windows)]
-    let _tray = tray::Tray::start(port, stop.clone())?;
+    let tray = tray::Tray::start(port, stop.clone())?;
+    #[cfg(windows)]
+    let notifications = tokio::spawn(notification_worker(app.clone(), tray, shutdown.clone()));
     let mut exit = shutdown.clone();
     let cleanup = tokio::spawn(cleanup_worker(app.clone(), shutdown.clone()));
     let merger = tokio::spawn(merge_worker(app.clone(), shutdown.clone()));
@@ -1141,6 +1174,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = worker.await;
     let _ = merger.await;
     let _ = cleanup.await;
+    #[cfg(windows)]
+    let _ = notifications.await;
     Ok(())
 }
 
@@ -1213,6 +1248,40 @@ mod tests {
         let _ = action(State(app.clone()), Json(Action::DeleteTask { id: key })).await.unwrap();
         assert!(app.lock().await.data.tasks[0].blocker_id.is_none());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn approval_notification_waits_for_all_work() {
+        let mut d = initial_data();
+        assert_eq!(waiting_for_approval(&d), 0);
+        d.tasks = vec![task("done", 0), task("future", 0)];
+        assert_eq!(waiting_for_approval(&d), 1);
+        for status in ["todo", "now"] {
+            d.tasks[1].status = status.into();
+            assert_eq!(waiting_for_approval(&d), 0);
+        }
+        d.tasks[1].status = "done".into();
+        assert_eq!(waiting_for_approval(&d), 2);
+        for field in ["awaiting_merge", "merging", "review_pending", "attention", "error"] {
+            let mut value = serde_json::to_value(&d).unwrap();
+            value["tasks"][1][field] = if matches!(field, "attention" | "error") { json!("unfinished") } else { json!(true) };
+            assert_eq!(waiting_for_approval(&serde_json::from_value(value).unwrap()), 0, "{field}");
+        }
+        d.tasks[1].cleanup_at = Some(now() + 60_000);
+        assert_eq!(waiting_for_approval(&d), 1);
+        d.tasks[0].cleanup_at = Some(now() + 60_000);
+        assert_eq!(waiting_for_approval(&d), 0);
+        d.tasks[0].cleanup_at = None;
+        d.tasks[0].difficulty = Some(Difficulty::Easy);
+        d.projects.push(Project { id: "p".into(), name: "Project".into(), path: String::new(), auto_approve_easy: true, auto_approve_hard: true });
+        assert_eq!(waiting_for_approval(&d), 0);
+        d.tasks[0].difficulty = Some(Difficulty::Hard);
+        assert_eq!(waiting_for_approval(&d), 0);
+        d.tasks[0].difficulty = Some(Difficulty::Gen);
+        assert_eq!(waiting_for_approval(&d), 1);
+        d.tasks[0].difficulty = Some(Difficulty::Hard);
+        d.tasks[0].review_attempted = true;
+        assert_eq!(waiting_for_approval(&d), 1);
     }
 
     #[test]
