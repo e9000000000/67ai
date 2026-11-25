@@ -1,7 +1,7 @@
 use serde::Deserialize;
 
 #[derive(Deserialize)]
-pub struct Presence { pub id: String, pub focused: bool, pub rendered_at: u64 }
+pub struct Presence { pub id: String, pub focused: bool, pub rendered_at: u64, #[serde(default)] pub sequence: u64 }
 struct Client { presence: Presence, seen_at: u64 }
 
 #[derive(Default)]
@@ -15,6 +15,8 @@ impl Notification {
     pub const fn new(signals: Vec<String>) -> Self { Self { signals, clients: Vec::new(), pending: None } }
 
     pub fn presence(&mut self, presence: Presence, time: u64) {
+        if self.clients.iter().any(|c| c.presence.id == presence.id && c.presence.sequence > presence.sequence) { return; }
+        if presence.focused { self.pending = None; }
         self.clients.retain(|c| time.saturating_sub(c.seen_at) < 5000 && c.presence.id != presence.id);
         self.clients.push(Client { presence, seen_at: time });
     }
@@ -44,7 +46,7 @@ mod tests {
     use super::*;
 
     fn client(id: &str, focused: bool, rendered_at: u64) -> Presence {
-        Presence { id: id.into(), focused, rendered_at }
+        Presence { id: id.into(), focused, rendered_at, sequence: 0 }
     }
 
     #[test]
@@ -66,6 +68,32 @@ mod tests {
         assert!(!n.poll(vec!["finished".into()], 2, 1000));
         n.presence(client("foreground", false, 2), 1100);
         assert!(!n.poll(vec!["finished".into()], 2, 2700));
+    }
+
+    #[test]
+    fn refocusing_between_polls_cancels_pending_alert() {
+        let mut n = Notification::new(vec![]);
+        n.presence(client("tab", false, 2), 1000);
+        assert!(!n.poll(vec!["finished".into()], 2, 1000));
+        n.presence(client("tab", true, 2), 1100);
+        n.presence(client("tab", false, 2), 1200);
+        assert!(!n.poll(vec!["finished".into()], 2, 2700));
+        assert!(!n.poll(vec!["finished".into()], 2, 7000));
+    }
+
+    #[test]
+    fn delayed_reports_cannot_overwrite_newer_focus_state() {
+        let mut n = Notification::new(vec![]);
+        n.presence(Presence { sequence: 2, ..client("tab", true, 2) }, 1000);
+        n.presence(Presence { sequence: 1, ..client("tab", false, 1) }, 1100);
+        assert!(!n.poll(vec!["finished".into()], 2, 1200));
+        assert!(!n.poll(vec!["finished".into()], 2, 7000));
+
+        assert!(!n.poll(vec![], 3, 8000));
+        n.presence(Presence { sequence: 4, ..client("tab", false, 4) }, 9000);
+        assert!(!n.poll(vec!["finished".into()], 4, 9000));
+        n.presence(Presence { sequence: 3, ..client("tab", true, 3) }, 9100);
+        assert!(n.poll(vec!["finished".into()], 4, 10600));
     }
 
     #[test]
