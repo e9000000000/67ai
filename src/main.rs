@@ -609,7 +609,29 @@ async fn prepare_worktree(app: &App, task: &mut Task, project: &mut Project, set
     }
     Ok(())
 }
-async fn merge_task(task: &Task, project: &Project) -> Result<(), String> {
+async fn resolve_merge(app: &App, task: &Task, project: &Project, settings: &Settings, shutdown: &mut watch::Receiver<bool>) -> Result<(), String> {
+    update_task(app, &task.id, |t| t.message("system", "Resolving merge conflicts automatically with the hard-task model.")).await?;
+    let mut repair = task.clone();
+    repair.title = "Resolve parallel task merge conflicts".into();
+    repair.model = settings.hard_model.clone();
+    repair.thread_id = None;
+    repair.worktree = None;
+    repair.sent_count = 0;
+    repair.attention = Some("unconfirmed".into());
+    repair.messages.clear();
+    repair.message("user", format!("Resolve all conflicts in the merge already in progress in this project's main worktree for task: {}. Inspect git status, the merge base, both sides, and surrounding code. Preserve the intended changes from both main and the task; do not blindly choose ours or theirs. Resolve content, rename, deletion, and binary conflicts as needed and stage the resolved files. Run relevant checks. Stay on main and only edit this worktree. Do not commit or abort the merge, switch branches, modify other worktrees, push, deploy, or use destructive reset/clean commands. 67ai will verify and commit the merge automatically. Report completed only when all conflicts are resolved.\n\nOriginal task instructions:\n{}", task.title, task.messages.iter().filter(|m| m.role == "user").map(|m| m.text.as_str()).collect::<Vec<_>>().join("\n\n")));
+    run_codex(app, &repair, project, settings, shutdown, true).await?;
+    if git(&project.path, &["branch", "--show-current"]).await? != "main"
+        || !git(&project.path, &["diff", "--name-only", "--diff-filter=U"]).await?.is_empty() {
+        return Err("Automatic merge resolution left unresolved conflicts or changed branches.".into());
+    }
+    git(&project.path, &["rev-parse", "--verify", "MERGE_HEAD"]).await?;
+    git(&project.path, &["diff", "--exit-code"]).await?;
+    git(&project.path, &["diff", "--cached", "--check"]).await?;
+    git(&project.path, &["commit", "--no-edit"]).await?;
+    Ok(())
+}
+async fn merge_task(app: &App, task: &Task, project: &Project, settings: &Settings, shutdown: &mut watch::Receiver<bool>) -> Result<(), String> {
     let path = task.worktree.as_deref().ok_or("Missing task worktree")?;
     require_main(project).await?;
     let branch = git(path, &["branch", "--show-current"]).await?;
@@ -618,13 +640,23 @@ async fn merge_task(task: &Task, project: &Project) -> Result<(), String> {
     if !git(path, &["diff", "--cached", "--name-only"]).await?.is_empty() {
         git(path, &["commit", "-m", &format!("Complete task: {}", task.title)]).await?;
     }
+    let main_head = git(&project.path, &["rev-parse", "HEAD"]).await?;
+    let task_head = git(path, &["rev-parse", "HEAD"]).await?;
     if let Err(error) = git(&project.path, &["merge", "--no-edit", &branch]).await {
+        let result = if !git(&project.path, &["diff", "--name-only", "--diff-filter=U"]).await?.is_empty() {
+            resolve_merge(app, task, project, settings, shutdown).await
+        } else { Err(error) };
         // Abort only the merge we started; preserve both branches for a retry.
-        if git(&project.path, &["rev-parse", "--verify", "MERGE_HEAD"]).await.is_ok() {
-            git(&project.path, &["merge", "--abort"]).await?;
+        if let Err(error) = result {
+            if git(&project.path, &["rev-parse", "--verify", "MERGE_HEAD"]).await.is_ok() {
+                git(&project.path, &["merge", "--abort"]).await?;
+            }
+            return Err(format!("Merge failed. Automatic resolution could not finish; retry merge. {error}"));
         }
-        return Err(format!("Merge failed. Resolve the task branch against main, then retry. {error}"));
     }
+    require_main(project).await?;
+    git(&project.path, &["merge-base", "--is-ancestor", &main_head, "HEAD"]).await?;
+    git(&project.path, &["merge-base", "--is-ancestor", &task_head, "HEAD"]).await?;
     Ok(())
 }
 async fn merge_worker(app: App, mut shutdown: watch::Receiver<bool>) {
@@ -647,7 +679,7 @@ async fn merge_worker(app: App, mut shutdown: watch::Receiver<bool>) {
             let result = {
                 let _main_git = MAIN_GIT.lock().await;
                 match recover_main(&app, &task, &project, &settings, &mut shutdown).await {
-                    Ok(()) => merge_task(&task, &project).await,
+                    Ok(()) => merge_task(&app, &task, &project, &settings, &mut shutdown).await,
                     Err(e) => Err(e),
                 }
             };

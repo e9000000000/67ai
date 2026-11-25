@@ -102,7 +102,7 @@ try {
   assert.equal(d.tasks.find(t=>t.id===third).worktree,null);
   git(repo,'add','.'); git(repo,'commit','-m','Sequential task');
 
-  settings={...settings,parallelism:true,paused:true};
+  settings={...settings,parallelism:true,paused:true,hard_model:'merge-fail'};
   await action({action:'settings',...settings});
   const conflict=await create('Conflict');
   await action({action:'settings',...settings,paused:false});
@@ -119,17 +119,49 @@ try {
   assert.match(d.tasks.find(t=>t.id===conflict).error,/Merge failed/);
   assert.equal(git(repo,'status','--porcelain'),'');
   assert.equal(await readFile(path.join(repo,'base.txt'),'utf8'),'main edit\n');
-  git(tree,'merge','-s','ours','main','-m','Resolve test conflict');
+  // A successful model response alone must not count as resolving conflicts.
+  settings={...settings,hard_model:'merge-noop'};
+  await action({action:'settings',...settings,paused:false});
+  await action({action:'retry_merge',id:conflict});
+  d=await until(d=>d.tasks.find(t=>t.id===conflict).error);
+  assert.match(d.tasks.find(t=>t.id===conflict).error,/unresolved conflicts/);
+  assert.equal(git(repo,'status','--porcelain'),'');
+  // Retry invokes the resolver again, then commits without manual Git repair.
+  settings={...settings,hard_model:''};
+  await action({action:'settings',...settings,paused:false});
   await action({action:'retry_merge',id:conflict});
   d=await until(d=>!d.tasks.find(t=>t.id===conflict).awaiting_merge);
-  assert.equal(d.tasks.find(t=>t.id===conflict).error,null);
-  assert.equal(await readFile(path.join(repo,'base.txt'),'utf8'),'task edit\n');
+  const merged=d.tasks.find(t=>t.id===conflict);
+  assert.equal(merged.error,null);
+  assert.equal(merged.thread_id,'parallel-test');
+  assert.equal(merged.attention,null);
+  assert(merged.messages.some(m=>m.text.includes('Resolving merge conflicts automatically')));
+  assert.equal(await readFile(path.join(repo,'base.txt'),'utf8'),'main edit\ntask edit\n');
+  assert.equal(git(repo,'status','--porcelain'),'');
+  git(repo,'merge-base','--is-ancestor',git(tree,'rev-parse','HEAD'),'HEAD');
+  assert.equal(git(repo,'rev-list','--parents','-n','1','HEAD').split(' ').length,3);
   await action({action:'approve_task',id:conflict});
+  // A fresh conflicting task completes its merge without any retry action.
+  await action({action:'settings',...settings});
+  const automatic=await create('Automatic');
+  await action({action:'settings',...settings,paused:false});
+  d=await until(d=>d.tasks.find(t=>t.id===automatic).thread_id);
+  const automaticTree=d.tasks.find(t=>t.id===automatic).worktree;
+  await action({action:'settings',...settings});
+  await until(d=>d.tasks.find(t=>t.id===automatic).awaiting_merge);
+  await writeFile(path.join(repo,'base.txt'),'new main edit\n');
+  git(repo,'add','.'); git(repo,'commit','-m','Another main edit');
+  await writeFile(path.join(automaticTree,'base.txt'),'new task edit\n');
+  await action({action:'settings',...settings,paused:false});
+  d=await until(d=>!d.tasks.find(t=>t.id===automatic).awaiting_merge);
+  assert.equal(d.tasks.find(t=>t.id===automatic).error,null);
+  assert(d.tasks.find(t=>t.id===automatic).messages.some(m=>m.text.includes('Resolving merge conflicts automatically')));
+  assert.equal(git(repo,'status','--porcelain'),'');
   // Dirty main is reported without running Codex or changing the user's files.
   await writeFile(path.join(repo,'base.txt'),'uncommitted\n');
   const dirty=await create('Dirty');
   d=await until(d=>d.tasks.find(t=>t.id===dirty).error);
-  assert.match(d.tasks.find(t=>t.id===dirty).error,/Commit or stash/);
+  assert.match(d.tasks.find(t=>t.id===dirty).error,/Select a hard-task model/);
   assert.equal(d.tasks.find(t=>t.id===dirty).thread_id,null);
   assert.equal(await readFile(path.join(repo,'base.txt'),'utf8'),'uncommitted\n');
   console.log('PASS: defaults, worker limit, isolated worktrees, sequential merges, orange pending state, restart, settings changes, conflicts, retry, dirty-main protection.');
