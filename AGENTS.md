@@ -72,3 +72,6 @@ Portable instructions for agents working on a Unity project. Use the Unity versi
 - never guess about something, you have binary files, you have assets, use it to get information.
 - when you are done, and there is nothing left to fetch, like you know basically everything about how the game works, and you have all the assets - write a plan how to use those assets and information and docs to make (restore) a new (identical) game.
 - if there were used some libraries like DOTween - tell me about it
+
+# UI copy
+- Do not add explanatory descriptions or helper paragraphs to task creation. Keep controls compact; on desktop, keep the blocker selector on the same row as project selection.
