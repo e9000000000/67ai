@@ -251,3 +251,10 @@ input[type="checkbox"] { width: auto; accent-color: var(--accent); }
 .shell-status.failed, .shell-status.interrupted { color: #ffac83; }
 .shell-meta { padding: 0 12px; color: var(--muted); font-size: .8rem; overflow-wrap: anywhere; }
 .shell-command pre { margin: 12px; padding: 12px; background: var(--bg); white-space: pre-wrap; overflow-wrap: anywhere; font-size: .8rem; }
+.content-plan-list { display: grid; gap: 10px; margin-top: 18px; }
+.content-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0; }
+.content-brief dt { font-weight: 600; margin-top: 12px; }
+.content-brief dd { margin: 4px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.sample-report { white-space: pre-wrap; overflow-wrap: anywhere; padding: 14px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; }
+#content-plan details { margin: 16px 0; }
+#sample-history { overflow-wrap: anywhere; }

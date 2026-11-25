@@ -38,6 +38,7 @@ async function refresh() {
   document.title = data.tasks.some(needsAttention) ? 'QUESTION' : `67ai-${data.tasks.filter(t => t.status === 'todo').length}-${data.tasks.filter(t => t.status === 'now').length}`;
   renderBoard(); if (selectedTask) refreshPanel();
   refreshShell();
+  refreshContentPlan();
 }
 function modelOptions(value = '', withConfig = true) {
   const all = [...new Set([...models, data.settings.hard_model, data.settings.easy_model, data.settings.gen_model, value].filter(Boolean))];
@@ -58,8 +59,16 @@ function difficultyBadge(t) {
   const difficulty = t.difficulty || (easy_model !== hard_model ? t.model === easy_model ? 'easy' : t.model === hard_model ? 'hard' : '' : '');
   return ['easy', 'hard', 'gen'].includes(difficulty) ? `<span class="task-difficulty ${difficulty}">${{easy:'Easy',hard:'Hard',gen:'Gen'}[difficulty]}</span>` : '';
 }
+function contentHold(t) {
+  if (!t.content_plan_id) return '';
+  const p=data.content_plans.find(p=>p.id===t.content_plan_id);
+  if (!p || p.sample_id===t.id) return '';
+  if(p.revision!==t.content_revision)return 'Earlier sample revision — create fresh batch research';
+  return p.decision!=='accepted'||!p.sample_ready?'Waiting for a ready, accepted sample':'';
+}
+
 function card(t) {
-  return `<button class="task-card ${t.status==='now'?'running':''} ${needsAttention(t)?'needs-attention':''} ${t.awaiting_merge?'awaiting-merge':''}" data-task="${t.id}" draggable="${t.status!=='now'&&!t.awaiting_merge}"><h3>${escape(t.title)}</h3>${t.cleanup_at ? `<span class="approval-countdown" data-cleanup="${t.id}">${cleanupLabel(t)}</span>` : ''}<span class="card-meta">${difficultyBadge(t)}${!projectId ? '<span>'+escape(project(t.project_id)?.name)+'</span>' : ''}${t.blocker_id ? `<span>Blocker: ${escape(data.tasks?.find(b=>b.id===t.blocker_id)?.title || 'Missing task')}</span>` : ''}${t.review_pending ? '<span>AI review '+(t.status==='now'?'running':t.error?'interrupted':'queued')+'</span>' : ''}${t.awaiting_merge ? `<span>${t.merging?'Merging into main':t.error?'Merge needs attention':'Waiting to merge'}</span>` : ''}${needsAttention(t) ? `<span class="card-error">${escape(attentionLabel(t))}</span>` : ''}<span data-timer="${t.id}">${duration(elapsed(t))}</span></span></button>`;
+  return `<button class="task-card ${t.status==='now'?'running':''} ${needsAttention(t)?'needs-attention':''} ${t.awaiting_merge?'awaiting-merge':''}" data-task="${t.id}" draggable="${t.status!=='now'&&!t.awaiting_merge}"><h3>${escape(t.title)}</h3>${t.cleanup_at ? `<span class="approval-countdown" data-cleanup="${t.id}">${cleanupLabel(t)}</span>` : ''}<span class="card-meta">${difficultyBadge(t)}${!projectId ? '<span>'+escape(project(t.project_id)?.name)+'</span>' : ''}${contentHold(t) ? `<span>${escape(contentHold(t))}</span>` : ''}${t.blocker_id ? `<span>Blocker: ${escape(data.tasks?.find(b=>b.id===t.blocker_id)?.title || 'Missing task')}</span>` : ''}${t.review_pending ? '<span>AI review '+(t.status==='now'?'running':t.error?'interrupted':'queued')+'</span>' : ''}${t.awaiting_merge ? `<span>${t.merging?'Merging into main':t.error?'Merge needs attention':'Waiting to merge'}</span>` : ''}${needsAttention(t) ? `<span class="card-error">${escape(attentionLabel(t))}</span>` : ''}<span data-timer="${t.id}">${duration(elapsed(t))}</span></span></button>`;
 }
 function modal(title, body, wide = false, fullscreen = false) {
   const dialog = $('#dialog'); dialog.classList.toggle('wide', wide); dialog.classList.toggle('fullscreen', fullscreen);
@@ -143,7 +152,7 @@ function addProject() {
   formSubmit(async f => { const result = await api({action:'add_project',name:f.get('name'),path:f.get('path')}); projectId=result.id;renderBoard();toast('Project added'); });
 }
 function genTask(kind) {
-  if(kind === "content") return startContent();
+  if (kind === 'content') return contentPlans();
   const presets = {
     issues: ['Find issues', 'Thoroughly investigate this project for bugs, broken behavior, and other concrete problems. Create one Future task for each distinct issue with evidence, reproduction details where possible, relevant files, and acceptance criteria. Do not fix anything.'],
     features: ['Gen new features', 'Investigate this project and propose useful new features that fit its purpose and current design. Create a separate actionable Future task for each distinct feature with rationale, scope, relevant systems, and acceptance criteria. Do not implement anything.']
@@ -156,23 +165,21 @@ function startContent() {
   const attachments=attachFiles($('#content-goal'), true);
   formSubmit(async f=>{await api({action:'create_task',project_id:f.get('project_id'),text:f.get('text'),title:'Gen more content',difficulty:'gen',content_planning:true,blocker_id:f.get('blocker_id')||null,model:data.settings.gen_model||'',status:'todo',attachments:await attachments.upload()});});
 }
-function contentPlans() {
-  const plans=(data.content_plans||[]).filter(p=>!projectId||p.project_id===projectId);
-  modal('Content plans', `<p class="help">Research and saved briefs remain here after task cleanup.</p>${plans.length?plans.map(p=>`<p><button class="button" data-plan="${p.id}">${escape(project(p.project_id)?.name)} ? ${escape(p.brief?.title||'Choose a content direction')}</button></p>`).join(''):'<p>No content research yet. Use Gen more content to start.</p>'}`);
-  document.querySelectorAll('[data-plan]').forEach(b=>b.onclick=()=>openContent(b.dataset.plan));
-}
-function openContent(key) {
+function openContent(key, researchOnly = false) {
   const p=data.content_plans.find(p=>p.id===key), r=p.research;
+  if(p.sample_brief&&!researchOnly)return openContentPlan(key);
+  if(!r)return newContentBrief(key);
   const references=`<details><summary>Research conversation and attachments</summary>${p.messages.filter(m=>['user','assistant','reviewer'].includes(m.role)).map(m=>`<article>${messageBody(m)}${(m.attachments||[]).map(f=>`<p><a href="/api/attachments/${encodeURIComponent(f.id)}" download="${escape(f.name)}">${escape(f.name)}</a></p>`).join('')}</article>`).join('')}</details>`;
   const details=d=>`<dl>${['experience','reuse','authoring','prerequisites','scope','constraints','quality_checks'].map(k=>`<dt>${escape(k.replaceAll('_',' '))}</dt><dd>${escape(d[k])}</dd>`).join('')}</dl>`;
-  modal('Content research and brief', `<div class="content-research"><h3>Inventory</h3>${r.inventory.map(e=>`<article><p>${escape(e.finding)}</p><p>Examples: ${escape(e.examples)}</p><p class="path">${e.paths.map(escape).join(' ? ')||'Unknown source'}</p></article>`).join('')}<h3>Unknowns</h3><p>${escape(r.unknowns.join('\n')||'None reported')}</p><h3>Recommended first step</h3><p>${escape(r.recommendation)}</p>${references}${p.brief?`<h3>Saved brief: ${escape(p.brief.title)}</h3>${details(p.brief)}${p.brief.tasks.map(t=>`<p><strong>${escape(t.title)}</strong>: ${escape(t.text)}</p>`).join('')}`:r.directions.map((d,i)=>`<article><h3>${escape(d.title)}</h3>${details(d)}<button class="button" data-direction="${i}">Choose / revise: ${escape(d.title)}</button></article>`).join('')}${!p.brief&&task(p.source_id)?'<button class="button" id="revise-research">Ask Gen to revise directions</button>':''}</div>`,true);
+  modal('Content research and brief', `<div class="content-research"><h3>Inventory</h3>${r.inventory.map(e=>`<article><p>${escape(e.finding)}</p><p>Examples: ${escape(e.examples)}</p><p class="path">${e.paths.map(escape).join(' ? ')||'Unknown source'}</p></article>`).join('')}<h3>Unknowns</h3><p>${escape(r.unknowns.join('\n')||'None reported')}</p><h3>Recommended first step</h3><p>${escape(r.recommendation)}</p>${references}${p.brief?`<h3>Saved brief: ${escape(p.brief.title)}</h3>${details(p.brief)}${p.brief.tasks.map(t=>`<p><strong>${escape(t.title)}</strong>: ${escape(t.text)}</p>`).join('')}`:r.directions.map((d,i)=>`<article><h3>${escape(d.title)}</h3>${details(d)}<button class="button" data-direction="${i}">Choose / revise: ${escape(d.title)}</button></article>`).join('')}${p.brief?`<button class="button primary" id="prepare-sample">${p.sample_brief?'View sample and feedback':'Define playable sample'}</button>`:''}${!p.brief&&task(p.source_id)?'<button class="button" id="revise-research">Ask Gen to revise directions</button>':''}</div>`,true);
+  if($('#prepare-sample'))$('#prepare-sample').onclick=()=>p.sample_brief?openContentPlan(key):newContentBrief(key);
   document.querySelectorAll('[data-direction]').forEach(b=>b.onclick=()=>editContent(key,Number(b.dataset.direction)));
   if($('#revise-research'))$('#revise-research').onclick=()=>{$('#dialog').close();openTask(p.source_id);$('#message-input').focus();};
 }
 function editContent(key,index) {
   const p=data.content_plans.find(p=>p.id===key), d=p.research.directions[index];
-  modal('Revise and save content brief', `<form id="modal-form"><p class="help">Save creates only these tasks in Future. Nothing starts automatically. For a different direction or new evidence, ask Gen to revise the research.</p>${['title','experience','reuse','authoring','prerequisites','scope','constraints','quality_checks'].map(k=>`<label class="field"><span>${escape(k.replaceAll('_',' '))}</span><textarea name="${k}" required>${escape(d[k])}</textarea></label>`).join('')}<h3>First batch tasks</h3>${d.tasks.map((t,i)=>`<label class="field"><span>Task ${i+1} title</span><input name="title_${i}" value="${escape(t.title)}" required></label><label class="field"><span>Task ${i+1} scope and checks</span><textarea name="text_${i}" required>${escape(t.text)}</textarea></label>`).join('')}${formEnd('Save brief & create Future cards')}` ,true);
-  formSubmit(async f=>{const brief=Object.fromEntries(['title','experience','reuse','authoring','prerequisites','scope','constraints','quality_checks'].map(k=>[k,f.get(k)]));brief.tasks=d.tasks.map((t,i)=>({title:f.get(`title_${i}`),text:f.get(`text_${i}`)}));await api({action:'select_content',id:key,brief});toast('Brief saved. Selected tasks are in Future.');});
+  modal('Revise and save content brief', `<form id="modal-form"><p class="help">Save this direction, then define one playable sample before expanding. For a different direction or new evidence, ask Gen to revise the research.</p>${['title','experience','reuse','authoring','prerequisites','scope','constraints','quality_checks'].map(k=>`<label class="field"><span>${escape(k.replaceAll('_',' '))}</span><textarea name="${k}" required>${escape(d[k])}</textarea></label>`).join('')}<h3>Research proposals (reference only)</h3>${d.tasks.map((t,i)=>`<label class="field"><span>Task ${i+1} title</span><input name="title_${i}" value="${escape(t.title)}" required></label><label class="field"><span>Task ${i+1} scope and checks</span><textarea name="text_${i}" required>${escape(t.text)}</textarea></label>`).join('')}${formEnd('Save direction')}` ,true);
+  formSubmit(async f=>{const brief=Object.fromEntries(['title','experience','reuse','authoring','prerequisites','scope','constraints','quality_checks'].map(k=>[k,f.get(k)]));brief.tasks=d.tasks.map((t,i)=>({title:f.get(`title_${i}`),text:f.get(`text_${i}`)}));await api({action:'select_content',id:key,brief});},()=>newContentBrief(key));
 }
 function newTask(status = 'todo', preset = null) {
   if (!data.projects.length) { addProject(); toast('Add your first project folder, then create a task.'); return; }
@@ -206,6 +213,10 @@ function openTask(key) {
   $('#overlay').hidden=false; $('#task-panel').hidden=false;
   $('main').inert=true;
   $('#task-panel').innerHTML=`<div class="panel-header"><h2 id="panel-title"></h2><span id="panel-difficulty"></span><details class="app-menu task-menu"><summary aria-label="Task menu" title="Task menu"><span class="burger"></span></summary><div class="menu-items"><label class="field mobile-task-state"><span>Move to</span><select id="task-state" aria-label="Task state">${states.map(status=>`<option value="${status}" ${status==='now'?'disabled':''}>${status[0].toUpperCase()+status.slice(1)}</option>`).join('')}</select></label><label class="field"><span>Model</span><select id="task-model" aria-label="Task model">${modelOptions(t.model)}</select></label><label class="field"><span>Blocker</span><select id="task-blocker" aria-label="Blocker task"></select></label><button id="task-agents">AGENTS.md</button><button id="edit-task">Edit title</button><button id="delete-task">Delete task</button><button id="stop-task" hidden>Stop</button></div></details><button id="approve-task" class="button primary small" title="Approve and clean up this task and its Codex session in 30 minutes. Project files stay." hidden>Approve</button><button id="ai-approve-task" class="button small" title="Review this result with the Hard model" hidden>AI approve</button><button id="revive-task" class="button small" title="Cancel cleanup" hidden>Revive</button><button id="close-task" class="icon-button" aria-label="Close task">×</button></div><div id="task-blocker-status" class="merge-status" role="status" hidden></div><div class="messages" id="messages"></div><form class="composer" id="message-form"><textarea id="message-input" placeholder="Add details or ask Codex to continue…" aria-label="Message to Codex" required></textarea></form>`;
+  if (t.content_plan_id) {
+    $('#messages').insertAdjacentHTML('beforebegin', '<button id="task-content-plan" class="button small">Content plan &amp; sample feedback</button>');
+    $('#task-content-plan').onclick=()=>{closeTask();openContentPlan(t.content_plan_id);};
+  }
   $('#close-task').onclick=closeTask;
   $('#task-model').onchange=async e=>{await act({action:'edit_task',id:key,title:task(key).title,model:e.target.value});refreshPanel();};
   $('#task-state').onchange=async e=>{e.target.closest('details').open=false;await act({action:'move_task',id:key,status:e.target.value});refreshPanel();};
@@ -258,10 +269,10 @@ function refreshPanel() {
   $('#send-message').disabled=!!t.awaiting_merge;
   let planner=$('#task-content-plans');
   if(t.content_planning&&!planner){planner=document.createElement('button');planner.id='task-content-plans';planner.className='button small';planner.textContent='View content directions / briefs';$('#messages').before(planner);planner.onclick=()=>{const plans=(data.content_plans||[]).filter(p=>p.source_id===t.id);if(plans.length)openContent(plans.at(-1).id);else toast('Research is not ready yet.');};}
-  const signature=JSON.stringify([t.messages,t.error,t.attention,t.status,t.awaiting_merge,t.merging]);if(signature===lastMessages)return;lastMessages=signature;
+  const signature=JSON.stringify([t.messages,t.error,t.attention,t.status,t.awaiting_merge,t.merging,contentHold(t)]);if(signature===lastMessages)return;lastMessages=signature;
   const messages=$('#messages');const atBottom=messages.scrollHeight-messages.scrollTop-messages.clientHeight<90||!messages.innerHTML;
   const opened=[...messages.querySelectorAll('details[open]')].map(el=>el.dataset.index);
-  messages.innerHTML=(t.awaiting_merge?`<div class="merge-status" role="status">${t.merging?'Merging into main?':'Completed. Waiting to merge into main.'}</div>`:'')+(needsAttention(t)&&!t.error?`<div class="run-error" role="status">${escape(attentionLabel(t))}. This task is unfinished. Reply below to continue.</div>`:'')+(t.error?`<div class="run-error">${escape(t.error)}${t.status!=='now'&&!t.merging?`<div><button id="retry-task" class="button small">${t.awaiting_merge?'Retry merge':'Retry in queue'}</button></div>`:''}</div>`:'')+t.messages.map((m,i)=>{
+  messages.innerHTML=(contentHold(t)?`<div class="merge-status">${escape(contentHold(t))}</div>`:'')+(t.awaiting_merge?`<div class="merge-status" role="status">${t.merging?'Merging into main?':'Completed. Waiting to merge into main.'}</div>`:'')+(needsAttention(t)&&!t.error?`<div class="run-error" role="status">${escape(attentionLabel(t))}. This task is unfinished. Reply below to continue.</div>`:'')+(t.error?`<div class="run-error">${escape(t.error)}${t.status!=='now'&&!t.merging?`<div><button id="retry-task" class="button small">${t.awaiting_merge?'Retry merge':'Retry in queue'}</button></div>`:''}</div>`:'')+t.messages.map((m,i)=>{
     if(m.role==='system')return `<div class="message system">${escape(m.text)}</div>`;
     if(m.role==='activity')return `<div class="message activity"><details data-index="${i}" ${opened.includes(String(i))?'open':''}><summary>${escape(m.text.split('\n')[0].slice(0,140))}</summary><pre>${escape(m.text)}</pre></details></div>`;
     return `<article class="message ${m.role}"><div class="message-label">${m.role==='reviewer'?'AI reviewer':m.role==='user'?'You':'◈ Codex'}<time>${new Date(m.at).toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit'})}</time></div>${messageBody(m)}<div class="attachment-list">${(m.attachments||[]).map(f=>`<a class="attachment-chip" href="/api/attachments/${encodeURIComponent(f.id)}" download="${escape(f.name)}">${attachmentMarkup(f, `/api/attachments/${encodeURIComponent(f.id)}`)}</a>`).join('')}</div></article>`;
