@@ -2,13 +2,15 @@ const $ = (s, root = document) => root.querySelector(s);
 const escape = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 let data, models = [], projectId = '', selectedTask = '', lastBoard = '', lastMessages = '', serverOffset = 0;
 const clientId = crypto.randomUUID();
-let renderedAt = 0;
+let renderedAt = 0, presenceSequence = 0;
 function reportPresence() {
-  fetch('/api/presence', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:clientId,focused:document.visibilityState==='visible'&&document.hasFocus(),rendered_at:renderedAt}),keepalive:true}).catch(()=>{});
+  fetch('/api/presence', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:clientId,focused:document.visibilityState==='visible'&&document.hasFocus(),rendered_at:renderedAt,sequence:++presenceSequence}),keepalive:true}).catch(()=>{});
 }
 window.addEventListener('focus', reportPresence);
 window.addEventListener('blur', reportPresence);
 document.addEventListener('visibilitychange', reportPresence);
+reportPresence();
+setInterval(reportPresence, 1200);
 const states = ['future', 'todo', 'now', 'done'];
 const project = key => data.projects.find(p => p.id === key);
 const task = key => data.tasks.find(t => t.id === key);
