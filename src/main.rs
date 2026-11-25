@@ -1246,6 +1246,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let worker = tokio::spawn(worker(app.clone(), shutdown));
     let router = Router::new()
         .route("/", get(|| async { Html(include_str!("../web/index.html")) }))
+        .route("/favicon.ico", get(|| async { ([("content-type", "image/x-icon")], include_bytes!("../assets/icons/67ai.ico").as_slice()) }))
+        .route("/apple-touch-icon.png", get(|| async { ([("content-type", "image/png")], include_bytes!("../assets/icons/apple-touch-icon.png").as_slice()) }))
         .route("/app.js", get(|| async { ([("content-type", "text/javascript")], include_str!("../web/app.js")) }))
         .route("/content.js", get(|| async { ([("content-type", "text/javascript")], include_str!("../web/content.js")) }))
         .route("/markdown.js", get(|| async { ([("content-type", "text/javascript")], include_str!("../web/markdown.js")) }))

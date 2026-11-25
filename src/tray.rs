@@ -25,7 +25,7 @@ unsafe fn icon(window: HWND, action: u32) -> bool {
         data.uID = 1;
         data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
         data.uCallbackMessage = CALLBACK;
-        data.hIcon = LoadIconW(null_mut(), IDI_APPLICATION);
+        data.hIcon = LoadIconW(GetModuleHandleW(null()), 1 as *const u16);
         let tip = wide("67ai");
         data.szTip[..tip.len()].copy_from_slice(&tip);
         Shell_NotifyIconW(action, &data) != 0
@@ -120,6 +120,12 @@ impl Drop for Tray {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn embedded_app_icon_loads() {
+        let icon = unsafe { LoadIconW(GetModuleHandleW(null()), 1 as *const u16) };
+        assert!(!icon.is_null(), "The executable must contain the 67ai icon");
+    }
 
     #[test]
     fn tray_exit_requests_shutdown() {
