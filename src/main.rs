@@ -3,6 +3,9 @@
 #[cfg(windows)]
 mod tray;
 
+#[cfg(windows)]
+mod shells;
+
 mod content;
 mod notification;
 use content::*;
@@ -70,11 +73,6 @@ async fn attachment(State(app): State<App>, Path(key): Path<String>) -> Result<i
 #[serde(rename_all = "lowercase")]
 enum Difficulty { Easy, Hard, Gen }
 #[derive(Clone, Serialize, Deserialize)]
-struct ShellCommand {
-    id: String, command: String, cwd: String, agent: String, status: String,
-    output: String, exit_code: Option<i64>, started_at: u64, finished_at: Option<u64>,
-}
-#[derive(Clone, Serialize, Deserialize)]
 struct Task {
     id: String, project_id: String, title: String, model: String, status: String,
     messages: Vec<Message>, created_at: u64, queued_at: u64, elapsed_ms: u64,
@@ -82,7 +80,6 @@ struct Task {
     sent_count: usize, cancel: bool,
     #[serde(default)] content_planning: bool,
     #[serde(default)] blocker_id: Option<String>,
-    #[serde(default)] shell_commands: Vec<ShellCommand>,
     #[serde(default)] difficulty: Option<Difficulty>,
     #[serde(default)] cleanup_at: Option<u64>,
     #[serde(default)] attention: Option<String>,
@@ -198,6 +195,13 @@ fn initial_data() -> Data {
 async fn state(State(app): State<App>) -> Json<Value> {
     let store = app.lock().await;
     Json(json!({"data": store.data, "models": models(), "data_file": store.file, "server_time": now()}))
+}
+
+async fn live_shells() -> ApiResult {
+    #[cfg(windows)]
+    { shells::list().map(|items| Json(json!(items))).map_err(bad) }
+    #[cfg(not(windows))]
+    { Err(bad("Live shell inspection is supported on Windows.")) }
 }
 
 async fn presence(Json(presence): Json<notification::Presence>) -> StatusCode {
@@ -358,7 +362,7 @@ async fn action(State(app): State<App>, Json(action): Json<Action>) -> ApiResult
             if !d.projects.iter().any(|p| p.id == project_id) { return Err(bad("Project not found")); }
             let blocker_id = blocker_id.filter(|id| !id.is_empty());
             validate_blocker(&d, "", &project_id, blocker_id.as_deref())?;
-            let mut task = Task { blocker_id, id: id(), project_id, title: title.trim().into(), model, status, difficulty, messages: vec![], shell_commands: vec![], created_at: now(), queued_at: now(), elapsed_ms: 0, started_at: None, thread_id: None, error: None, sent_count: 0, cancel: false, cleanup_at: None, attention: None, worktree: None, awaiting_merge: false, merging: false, review_pending: false, review_attempted: false, content_planning, content_plan_id: None, content_revision: 0, implementation_completed: false };
+            let mut task = Task { blocker_id, id: id(), project_id, title: title.trim().into(), model, status, difficulty, messages: vec![], created_at: now(), queued_at: now(), elapsed_ms: 0, started_at: None, thread_id: None, error: None, sent_count: 0, cancel: false, cleanup_at: None, attention: None, worktree: None, awaiting_merge: false, merging: false, review_pending: false, review_attempted: false, content_planning, content_plan_id: None, content_revision: 0, implementation_completed: false };
             task.message("user", text.trim()); task.messages.last_mut().unwrap().attachments = attachments;
             result = json!({"id": task.id}); d.tasks.push(task);
         }
@@ -501,34 +505,6 @@ async fn update_task(app: &App, key: &str, f: impl FnOnce(&mut Task)) -> Result<
     store.commit(d)
 }
 
-fn shell_event(task: &mut Task, value: &Value, run: &str, cwd: &str, agent: &str) {
-    let phase = value["type"].as_str().unwrap_or("");
-    let item = &value["item"];
-    if !matches!(phase, "item.started" | "item.updated" | "item.completed") || item["type"] != "command_execution" { return; }
-    let key = format!("{run}:{}", item["id"].as_str().unwrap_or("command"));
-    let index = match task.shell_commands.iter().position(|c| c.id == key) {
-        Some(index) => index,
-        None => {
-            task.shell_commands.push(ShellCommand { id: key, command: String::new(), cwd: cwd.into(), agent: agent.into(),
-                status: "running".into(), output: String::new(), exit_code: None, started_at: now(), finished_at: None });
-            task.shell_commands.len() - 1
-        }
-    };
-    let command = &mut task.shell_commands[index];
-    if let Some(text) = item["command"].as_str() { command.command = text.into(); }
-    if let Some(text) = item["aggregated_output"].as_str() { command.output = text.chars().take(12000).collect(); }
-    command.exit_code = item["exit_code"].as_i64();
-    if phase == "item.completed" {
-        command.status = if item["status"] == "failed" || command.exit_code.is_some_and(|code| code != 0) { "failed" } else { "completed" }.into();
-        command.finished_at = Some(now());
-    }
-}
-fn interrupt_shell_commands(task: &mut Task) {
-    for command in &mut task.shell_commands {
-        if command.status == "running" { command.status = "interrupted".into(); command.finished_at = Some(now()); }
-    }
-}
-
 fn event(task: &mut Task, value: &Value) -> bool {
     match value["type"].as_str().unwrap_or("") {
         "thread.started" => { task.thread_id = value["thread_id"].as_str().map(String::from); }
@@ -566,32 +542,6 @@ fn event(task: &mut Task, value: &Value) -> bool {
     }
     true
 }
-
-// A Windows job closes the entire process tree when a run stops or this server exits.
-#[cfg(windows)]
-struct ProcessJob(windows_sys::Win32::Foundation::HANDLE);
-#[cfg(windows)]
-unsafe impl Send for ProcessJob {}
-#[cfg(windows)]
-impl ProcessJob {
-    fn attach(child: &tokio::process::Child) -> Result<Self, String> {
-        use windows_sys::Win32::{System::JobObjects::*, Foundation::*};
-        unsafe {
-            let handle = CreateJobObjectW(std::ptr::null(), std::ptr::null());
-            if handle.is_null() { return Err(std::io::Error::last_os_error().to_string()); }
-            let job = Self(handle);
-            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
-            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-            if SetInformationJobObject(handle, JobObjectExtendedLimitInformation, &info as *const _ as *const _, std::mem::size_of_val(&info) as u32) == 0 {
-                return Err(std::io::Error::last_os_error().to_string());
-            }
-            if AssignProcessToJobObject(handle, child.raw_handle().unwrap() as HANDLE) == 0 { return Err(std::io::Error::last_os_error().to_string()); }
-            Ok(job)
-        }
-    }
-}
-#[cfg(windows)]
-impl Drop for ProcessJob { fn drop(&mut self) { unsafe { windows_sys::Win32::Foundation::CloseHandle(self.0); } } }
 
 fn review_event(review: &mut Task, value: &Value) -> bool {
     if value["type"] == "item.completed" && value["item"]["type"] == "agent_message" {
@@ -654,7 +604,8 @@ async fn pause_for_limit(app: &App, executable: &str) -> Result<(), String> {
 async fn run_codex(app: &App, task: &Task, project: &Project, settings: &Settings, shutdown: &mut watch::Receiver<bool>, recovery: bool) -> Result<RunResult, String> {
     let run = id();
     let result = run_codex_inner(app, task, project, settings, shutdown, recovery, &run).await;
-    update_task(app, &task.id, interrupt_shell_commands).await?;
+    #[cfg(windows)]
+    if result.is_err() { shells::remove(&run); }
     result
 }
 
@@ -722,8 +673,8 @@ async fn run_codex_inner(app: &App, task: &Task, project: &Project, settings: &S
     command.creation_flags(0x08000000); // CREATE_NO_WINDOW
     let mut child = command.spawn().map_err(|e| format!("Could not start Codex: {e}. Check Settings → Codex executable."))?;
     #[cfg(windows)]
-    let _job = match ProcessJob::attach(&child) {
-        Ok(job) => job, Err(e) => { let _ = child.kill().await; return Err(format!("Could not contain Codex process: {e}")); }
+    match shells::attach(&child, run, task, project, recovery) {
+        Ok(()) => (), Err(e) => { let _ = child.kill().await; return Err(format!("Could not contain Codex process: {e}")); }
     };
     let mut input = child.stdin.take().unwrap();
     input.write_all(prompt.as_bytes()).await.map_err(|e| e.to_string())?;
@@ -739,6 +690,7 @@ async fn run_codex_inner(app: &App, task: &Task, project: &Project, settings: &S
     let mut gen_reply = None;
     let mut tick = tokio::time::interval(std::time::Duration::from_millis(250));
     let mut last_checkpoint = now();
+    let mut exited_at = None;
     loop {
         tokio::select! {
             line = out.next_line(), if !stdout_done => match line.map_err(|e| e.to_string())? {
@@ -748,7 +700,6 @@ async fn run_codex_inner(app: &App, task: &Task, project: &Project, settings: &S
                         limited = true;
                     }
                     update_task(app, &task.id, |t| {
-                        shell_event(t, &value, run, &project.path, if recovery { "Merge recovery" } else if task.review_pending { "AI reviewer" } else { "Task agent" });
                         if task.review_pending {
                             if !review_event(&mut recovery_state, &value) { failed = true; }
                         } else if generating && value["type"] == "item.completed" && value["item"]["type"] == "agent_message" {
@@ -773,6 +724,12 @@ async fn run_codex_inner(app: &App, task: &Task, project: &Project, settings: &S
                 let mut store = app.lock().await;
                 if store.data.tasks.iter().any(|t| t.id == task.id && t.cancel) {
                     drop(store); let _ = child.kill().await; return Err("Stopped by you. Move the task to todo to resume.".into());
+                }
+                // Surviving programs can keep inherited stdout/stderr handles open.
+                // Drain buffered events, then finish once Codex itself has exited.
+                if child.try_wait().map_err(|e| e.to_string())?.is_some() {
+                    let exited = exited_at.get_or_insert_with(tokio::time::Instant::now);
+                    if exited.elapsed() >= std::time::Duration::from_millis(250) { break; }
                 }
                 if now().saturating_sub(last_checkpoint) >= 5000 {
                     let d = store.data.clone(); store.commit(d)?; last_checkpoint = now();
@@ -998,7 +955,7 @@ fn save_proposals(d: &mut Data, source: &Task, mut reply: GenReply) {
             skipped += 1;
             continue;
         }
-        let mut task = Task { blocker_id: None, id: id(), project_id: source.project_id.clone(), title: title.into(), model: d.settings.hard_model.clone(), status: "future".into(), difficulty: Some(Difficulty::Hard), messages: vec![], shell_commands: vec![], created_at: now(), queued_at: now(), elapsed_ms: 0, started_at: None, thread_id: None, error: None, sent_count: 0, cancel: false, cleanup_at: None, attention: None, worktree: None, awaiting_merge: false, merging: false, review_pending: false, review_attempted: false, content_planning: false, content_plan_id: None, content_revision: 0, implementation_completed: false };
+        let mut task = Task { blocker_id: None, id: id(), project_id: source.project_id.clone(), title: title.into(), model: d.settings.hard_model.clone(), status: "future".into(), difficulty: Some(Difficulty::Hard), messages: vec![], created_at: now(), queued_at: now(), elapsed_ms: 0, started_at: None, thread_id: None, error: None, sent_count: 0, cancel: false, cleanup_at: None, attention: None, worktree: None, awaiting_merge: false, merging: false, review_pending: false, review_attempted: false, content_planning: false, content_plan_id: None, content_revision: 0, implementation_completed: false };
         task.content_plan_id = source.content_plan_id.clone();
         task.content_revision = source.content_revision;
         task.message("user", proposal.text.trim());
@@ -1224,7 +1181,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _legacy_lock = legacy_lock;
     let mut data: Data = if file.exists() { serde_json::from_slice(&std::fs::read(&file)?)? } else { initial_data() };
     for t in &mut data.tasks {
-        interrupt_shell_commands(t);
         t.merging = false;
         if t.status == "now" {
             t.elapsed_ms += data.saved_at.saturating_sub(t.started_at.unwrap_or(data.saved_at));
@@ -1255,6 +1211,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/vendor/highlight.min.js", get(|| async { ([("content-type", "text/javascript")], include_str!("../web/vendor/highlight.min.js")) }))
         .route("/style.css", get(|| async { ([("content-type", "text/css")], include_str!("../web/style.css")) }))
         .route("/api/state", get(state)).route("/api/action", post(action)).route("/api/agents/{id}", get(agents))
+        .route("/api/shells", get(live_shells))
         .route("/api/presence", post(presence))
         .route("/api/rate-limits", get(rate_limits))
         .route("/api/attachments", post(upload).layer(axum::extract::DefaultBodyLimit::max(25 * 1024 * 1024)))
@@ -1606,7 +1563,7 @@ mod tests {
         assert!(old.attachments.is_empty());
     }
     fn task(status: &str, queued_at: u64) -> Task {
-        Task { blocker_id: None, id: id(), project_id: "p".into(), title: "Test".into(), model: "".into(), status: status.into(), difficulty: None, messages: vec![], shell_commands: vec![], created_at: 0, queued_at, elapsed_ms: 0, started_at: None, thread_id: None, error: None, sent_count: 0, cancel: false, cleanup_at: None, attention: None, worktree: None, awaiting_merge: false, merging: false, review_pending: false, review_attempted: false, content_planning: false, content_plan_id: None, content_revision: 0, implementation_completed: false }
+        Task { blocker_id: None, id: id(), project_id: "p".into(), title: "Test".into(), model: "".into(), status: status.into(), difficulty: None, messages: vec![], created_at: 0, queued_at, elapsed_ms: 0, started_at: None, thread_id: None, error: None, sent_count: 0, cancel: false, cleanup_at: None, attention: None, worktree: None, awaiting_merge: false, merging: false, review_pending: false, review_attempted: false, content_planning: false, content_plan_id: None, content_revision: 0, implementation_completed: false }
     }
     #[test]
     fn queue_is_fifo_and_sequential_by_default() {
@@ -1644,29 +1601,6 @@ mod tests {
         assert_eq!(next_task(&d), Some(2));
         d.tasks[2].project_id = "p".into();
         assert_eq!(next_task(&d), None); // Drain merges before starting a direct main run.
-    }
-    #[test]
-    fn tracks_shell_lifecycle_and_separates_runs() {
-        let mut t = task("now", 0);
-        let started = json!({"type":"item.started", "item":{"id":"cmd", "type":"command_execution", "command":"echo hello", "status":"in_progress"}});
-        shell_event(&mut t, &started, "run1", "project", "Task agent");
-        assert_eq!(t.shell_commands[0].status, "running");
-        shell_event(&mut t, &json!({"type":"item.updated", "item":{"id":"cmd", "type":"command_execution", "aggregated_output":"hello"}}), "run1", "project", "Task agent");
-        assert_eq!(t.shell_commands[0].output, "hello");
-        shell_event(&mut t, &json!({"type":"item.completed", "item":{"id":"cmd", "type":"command_execution", "exit_code":1, "status":"completed"}}), "run1", "project", "Task agent");
-        assert_eq!(t.shell_commands.len(), 1);
-        assert_eq!(t.shell_commands[0].command, "echo hello");
-        assert_eq!(t.shell_commands[0].status, "failed");
-        assert!(t.shell_commands[0].finished_at.is_some());
-        shell_event(&mut t, &started, "run2", "other", "AI reviewer");
-        interrupt_shell_commands(&mut t);
-        assert_eq!(t.shell_commands.len(), 2);
-        assert_eq!(t.shell_commands[0].status, "failed");
-        assert_eq!(t.shell_commands[1].status, "interrupted");
-        assert_eq!(t.shell_commands[1].agent, "AI reviewer");
-        let mut old = serde_json::to_value(&t).unwrap();
-        old.as_object_mut().unwrap().remove("shell_commands");
-        assert!(serde_json::from_value::<Task>(old).unwrap().shell_commands.is_empty());
     }
     #[test]
     fn captures_thread_messages_and_failures() {

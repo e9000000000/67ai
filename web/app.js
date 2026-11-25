@@ -92,20 +92,25 @@ function modal(title, body, wide = false, fullscreen = false) {
   $('#close-dialog').onclick = () => dialog.close(); if (!dialog.open) dialog.showModal();
 }
 function shellInspection() {
-  modal('Shell inspection', `<section class="shell-inspection"><p class="help">${escape(project(projectId)?.name || 'All projects')} &middot; Live agent shell commands. Output is limited to 12,000 characters per command.</p><div id="shell-commands"></div></section>`, false, true);
+  modal('Shell inspection', `<section class="shell-inspection"><p class="help">${escape(project(projectId)?.name || 'All projects')} &middot; Running programs started by agents.</p><div id="shell-commands"></div></section>`, false, true);
   refreshShell();
 }
-function refreshShell() {
-  const list = $('#shell-commands'); if (!list || !$('#dialog').open) return;
-  const commands = data.tasks.filter(t => !projectId || t.project_id === projectId)
-    .flatMap(t => (t.shell_commands || []).map(c => ({...c, task:t})))
-    .sort((a,b) => (b.status === 'running') - (a.status === 'running') || b.started_at - a.started_at);
-  const signature = JSON.stringify(commands);
-  if (list.shellSignature === signature) return;
-  list.shellSignature = signature;
-  const expanded = new Set([...list.querySelectorAll('details[open]')].map(el => el.dataset.command));
-  const known = new Set([...list.querySelectorAll('details')].map(el => el.dataset.command));
-  list.innerHTML = commands.map(c => `<details class="shell-command" data-command="${escape(c.id)}" ${expanded.has(c.id) || (!known.has(c.id) && c.status === 'running') ? 'open' : ''}><summary><span class="shell-status ${escape(c.status)}">${escape(c.status)}</span><code>${escape(c.command)}</code></summary><div class="shell-meta">${escape(project(c.task.project_id)?.name)} &middot; ${escape(c.task.title)} &middot; ${escape(c.agent)}<br>${escape(c.cwd)}<br>${escape(new Date(c.started_at).toLocaleString())}${c.finished_at ? ' &middot; '+duration(c.finished_at-c.started_at) : ''}${c.exit_code != null ? ' &middot; Exit: '+c.exit_code : ''}</div><pre>${escape(c.output || (c.status === 'running' ? 'Waiting for output...' : 'No output.'))}</pre></details>`).join('') || '<p class="help">No shell commands recorded for this selection yet.</p>';
+async function refreshShell() {
+  const list = $('#shell-commands'); if (!list || !$('#dialog').open || list.loading) return;
+  list.loading = true;
+  try {
+    const res = await fetch('/api/shells');
+    if (!res.ok) throw Error(await res.text());
+    const shells = (await res.json()).filter(s => !projectId || s.project_id === projectId).sort((a,b) => b.started_at-a.started_at || a.pid-b.pid);
+    if (!list.isConnected) return;
+    const signature = JSON.stringify(shells);
+    if (list.shellSignature === signature) return;
+    list.shellSignature = signature;
+    const expanded = new Set([...list.querySelectorAll('details[open]')].map(el => el.dataset.command));
+    list.innerHTML = shells.map(s => `<details class="shell-command" data-command="${escape(s.id)}" ${expanded.has(s.id) ? 'open' : ''}><summary><span class="shell-status running">Running</span><code>${escape(s.program)} &middot; PID ${s.pid}</code></summary><div class="shell-meta">${escape(project(s.project_id)?.name)} &middot; ${escape(s.task_title)} &middot; ${escape(s.agent)}<br>${escape(s.cwd)}</div><pre>${escape(s.path)}</pre></details>`).join('') || '<p class="help">No running shells for this selection.</p>';
+  } catch (err) {
+    if (list.isConnected) { list.shellSignature = null; list.textContent = err.message; }
+  } finally { list.loading = false; }
 }
 function formSubmit(handler, onSuccess = () => $('#dialog').close()) {
   $('#modal-form').onsubmit = async e => {

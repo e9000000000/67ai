@@ -1,6 +1,15 @@
 // Deterministic executable used by integration.mjs to test the queue without model calls.
 use std::{io::{BufRead, Read, Write}, time::Duration};
 fn main() {
+    if std::env::args().any(|a| a == "--shell-child") {
+        std::fs::write("shell.pid", std::process::id().to_string()).unwrap();
+        for _ in 0..1200 {
+            if std::path::Path::new("shell.stop").exists() { return; }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        return;
+    }
+
     if std::env::args().any(|a| a == "app-server") {
         for line in std::io::stdin().lock().lines() {
             let line = line.unwrap();
@@ -182,6 +191,14 @@ fn main() {
         std::fs::write(dir.join("limit-reset"), reset.to_string()).unwrap();
         println!(r#"{{"type":"turn.failed","error":{{"message":"You've hit your usage limit"}}}}"#);
         std::process::exit(1);
+    }
+    if prompt.contains("SHELL_PROCESS") {
+        let _ = std::fs::remove_file("shell.stop");
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child.arg("--shell-child").stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+        #[cfg(windows)]
+        { use std::os::windows::process::CommandExt; child.creation_flags(0x08000000); }
+        child.spawn().unwrap();
     }
     if prompt.contains("SHELL_TEST") {
         println!(r#"{{"type":"item.started","item":{{"id":"shell-1","type":"command_execution","command":"echo <hello>","status":"in_progress"}}}}"#);

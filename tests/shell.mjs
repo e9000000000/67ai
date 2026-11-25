@@ -1,5 +1,5 @@
 import {spawn, spawnSync} from 'node:child_process';
-import {mkdir} from 'node:fs/promises';
+import {mkdir, writeFile} from 'node:fs/promises';
 import path from 'node:path';
 import {pathToFileURL} from 'node:url';
 import assert from 'node:assert/strict';
@@ -35,12 +35,26 @@ try {
   };
   const a=await createProject('Project A'), b=await createProject('Project B');
   const create = async (project_id,title) => (await action({action:'create_task',project_id,title,text:title,model:'',status:'todo'})).id;
-  const id=await create(a,'SHELL_TEST first');
-  await until(d=>d.tasks.find(t=>t.id===id)?.shell_commands.some(c=>c.status==='running' && c.output==='<live output>'));
-  let d=await until(d=>d.tasks.find(t=>t.id===id)?.status==='done');
-  assert.equal(d.tasks.find(t=>t.id===id).shell_commands[0].exit_code,0);
-  const second=await create(b,'SHELL_TEST second');
+  const shells = async () => {
+    const r=await fetch(`${url}/api/shells`);
+    assert.equal(r.status,200,await r.clone().text()); return r.json();
+  };
+  const waitShells = async predicate => {
+    for(let i=0;i<150;i++) { const items=await shells(); if(predicate(items))return items; await delay(100); }
+    throw Error('Timed out waiting for live processes');
+  };
+  // Command events alone must never appear as shells.
+  const command=await create(a,'SHELL_TEST command history');
+  await until(d=>d.tasks.find(t=>t.id===command)?.status==='done');
+  assert.deepEqual(await shells(),[]);
+  const id=await create(a,'SHELL_PROCESS first');
+  await until(d=>d.tasks.find(t=>t.id===id)?.status==='done');
+  const first=(await waitShells(s=>s.some(s=>s.task_id===id))).find(s=>s.task_id===id);
+  assert.equal(first.program,'fake-codex.exe');
+  assert.ok(first.pid>0);
+  const second=await create(b,'SHELL_PROCESS second');
   await until(d=>d.tasks.find(t=>t.id===second)?.status==='done');
+  await waitShells(s=>s.length===2);
 
   const {chromium}=await import(pathToFileURL(path.resolve('tmp/browser/node_modules/playwright/index.mjs')).href);
   browser=await chromium.launch({channel:'msedge',headless:true,args:['--mute-audio']});
@@ -53,27 +67,31 @@ try {
     await page.getByRole('button',{name:'Shell inspection',exact:true}).click();
   };
   await open();
-  assert.equal(await page.locator('#shell-commands details').count(),1);
+  await page.waitForFunction(()=>document.querySelectorAll('#shell-commands details').length===1);
   await page.locator('#shell-commands summary').click();
-  assert.match(await page.locator('#shell-commands').innerText(), /<hello> done/);
-  assert.doesNotMatch(await page.locator('#shell-commands').innerText(), /Project B/);
+  assert.match(await page.locator('#shell-commands').innerText(), /fake-codex.exe/);
+  assert.match(await page.locator('#shell-commands').innerText(), new RegExp(`PID ${first.pid}`));
+  assert.doesNotMatch(await page.locator('#shell-commands').innerText(), /Project B|echo <hello>/);
   assert.equal(await page.locator('#shell-commands pre *').count(),0);
   await page.screenshot({path:path.join(root,'shell-project.png')});
   await page.keyboard.press('Escape');
   await page.getByRole('button',{name:'All projects',exact:true}).click();
   await open();
-  assert.equal(await page.locator('#shell-commands details').count(),2);
+  await page.waitForFunction(()=>document.querySelectorAll('#shell-commands details').length===2);
   await page.getByRole('button',{name:'Close dialog'}).click();
 
-  const live=await create(a,'SHELL_TEST SHELL_WAIT WAIT_TEST');
-  await until(d=>d.tasks.find(t=>t.id===live)?.shell_commands.some(c=>c.status==='running'));
+  const live=await create(a,'SHELL_PROCESS WAIT_TEST');
+  await waitShells(s=>s.some(s=>s.task_id===live));
   await open();
-  await page.locator('.shell-status.running').waitFor();
-  await page.getByText('<live output>',{exact:true}).waitFor();
+  await page.waitForFunction(()=>document.querySelectorAll('#shell-commands details').length===3);
   await action({action:'stop_task',id:live});
-  await until(d=>d.tasks.find(t=>t.id===live)?.shell_commands[0].status==='interrupted');
-  await page.locator('.shell-status.interrupted').waitFor();
-  assert.equal(await page.locator('details[open] .shell-status.interrupted').count(),1);
+  await until(d=>d.tasks.find(t=>t.id===live)?.status==='future');
+  await waitShells(s=>!s.some(s=>s.task_id===live));
+  await page.waitForFunction(()=>document.querySelectorAll('#shell-commands details').length===2);
+  // A real process exit removes the row while the inspection stays open.
+  await writeFile(path.join(root,'Project A','shell.stop'),'');
+  await waitShells(s=>!s.some(s=>s.task_id===id));
+  await page.waitForFunction(()=>document.querySelectorAll('#shell-commands details').length===1);
   await page.setViewportSize({width:390,height:844});
   assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
   await page.screenshot({path:path.join(root,'shell-mobile.png')});
@@ -81,18 +99,18 @@ try {
   const empty=await createProject('Empty');
   await page.getByRole('button',{name:'Empty',exact:true}).click();
   await open();
-  await page.getByText('No shell commands recorded for this selection yet.').waitFor();
+  await page.getByText('No running shells for this selection.').waitFor();
   assert.deepEqual(errors,[]);
   await browser.close(); browser=null;
 
-  const restart=await create(a,'SHELL_TEST SHELL_WAIT WAIT_TEST restart');
-  await until(d=>d.tasks.find(t=>t.id===restart)?.shell_commands[0]?.status==='running');
+  const failed=await create(a,'SHELL_PROCESS FAIL_TEST');
+  await until(d=>d.tasks.find(t=>t.id===failed)?.status==='done');
+  await waitShells(s=>!s.some(s=>s.task_id===failed));
+  assert.equal((await shells()).length,1);
   await stop(); await start();
-  d=await state();
-  assert.equal(d.tasks.find(t=>t.id===restart).shell_commands[0].status,'interrupted');
-  assert.equal(d.tasks.find(t=>t.id===id).shell_commands[0].output,'<hello> done');
+  assert.deepEqual(await shells(),[]);
   assert.ok(empty);
-  console.log(`Shell lifecycle, persistence, filtering, live UI and mobile checks passed. Screenshots: ${root}`);
+  console.log(`Live processes, completed agents, exit/stop/failure cleanup, project filtering and desktop/mobile UI checks passed. Screenshots: ${root}`);
 } finally {
   if(browser)await browser.close();
   if(server)await stop();
