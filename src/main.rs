@@ -7,6 +7,7 @@ use tokio::{io::{AsyncBufReadExt, AsyncWriteExt, BufReader}, process::Command, s
 type App = Arc<Mutex<Store>>;
 // Worktree setup, recovery, and merging must not edit main concurrently.
 static MAIN_GIT: Mutex<()> = Mutex::const_new(());
+const LIMIT_PAUSED: &str = "Codex limit reached. Work is queued and will resume automatically after the limit resets.";
 const DIRTY_MAIN: &str = "Commit or stash changes in the main worktree before starting or merging parallel tasks.";
 type ApiResult = Result<Json<Value>, (StatusCode, String)>;
 fn now() -> u64 { SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64 }
@@ -82,7 +83,7 @@ fn default_workers() -> usize { 4 }
 #[derive(Clone, Serialize, Deserialize)]
 struct Settings { #[serde(default)] hard_model: String, #[serde(default)] easy_model: String, codex_path: String, paused: bool, #[serde(default = "default_workers")] max_workers: usize, #[serde(default)] parallelism: bool }
 #[derive(Clone, Serialize, Deserialize)]
-struct Data { projects: Vec<Project>, tasks: Vec<Task>, templates: Vec<Template>, settings: Settings, saved_at: u64 }
+struct Data { projects: Vec<Project>, tasks: Vec<Task>, templates: Vec<Template>, settings: Settings, saved_at: u64, #[serde(default)] codex_paused_until: u64 }
 struct Store { data: Data, file: PathBuf }
 impl Store {
     fn commit(&mut self, mut data: Data) -> Result<(), String> {
@@ -126,7 +127,7 @@ fn initial_data() -> Data {
         (key.trim() == "model").then(|| value.trim().trim_matches('"').to_string())
     }).unwrap_or_default();
     Data {
-        projects: vec![], tasks: vec![], saved_at: now(),
+        projects: vec![], tasks: vec![], saved_at: now(), codex_paused_until: 0,
         settings: Settings { hard_model: model.clone(), easy_model: model, codex_path: detect_codex(), paused: false, max_workers: 4, parallelism: false },
         templates: vec![
             Template { id: id(), name: "Simple & direct".into(), content: "# Project instructions\n\nUse simple, straightforward code and existing tools. Match the existing style.\nAvoid speculative abstractions and unrelated changes.\nRun relevant checks and report what changed, what passed, and any remaining issues.\nWork sequentially. Do not spawn subagents or delegate work.\n".into() },
@@ -446,8 +447,43 @@ fn recovery_event(task: &mut Task, recovery: &mut Task, value: &Value) -> bool {
     for message in recovery.messages.drain(..) { task.message("activity", format!("Main worktree recovery: {}", message.text)); }
     ok
 }
+fn limit_error(text: &str) -> bool {
+    let text = text.to_ascii_lowercase();
+    ["usage_limit_reached", "rate_limit_exceeded", "usage limit", "rate limit", "rate_limit", "insufficient_quota"].iter().any(|s| text.contains(s))
+}
+
+fn limit_reset(value: &Value, time: u64) -> Option<u64> {
+    let limits = value["rateLimitsByLimitId"].get("codex").unwrap_or(&value["rateLimits"]);
+    ["primary", "secondary"].iter().filter_map(|key| {
+        let window = &limits[key];
+        if window["usedPercent"].as_f64()? < 100.0 { return None; }
+        window["resetsAt"].as_u64()?.checked_mul(1000).filter(|reset| *reset > time)
+    }).max()
+}
+
+async fn pause_for_limit(app: &App, executable: &str) -> Result<(), String> {
+    let retry_at = now() + 60_000;
+    // Block other workers immediately, including while the usage request is pending.
+    {
+        let mut store = app.lock().await;
+        let mut d = store.data.clone();
+        d.codex_paused_until = d.codex_paused_until.max(retry_at);
+        store.commit(d)?;
+    }
+    if let Ok(value) = codex_request(executable, "account/rateLimits/read", Value::Null).await {
+        if let Some(reset) = limit_reset(&value, now()) {
+            let mut store = app.lock().await;
+            let mut d = store.data.clone();
+            d.codex_paused_until = if d.codex_paused_until == retry_at { reset } else { d.codex_paused_until.max(reset) };
+            store.commit(d)?;
+        }
+    }
+    Ok(())
+}
+
 async fn run_codex(app: &App, task: &Task, project: &Project, settings: &Settings, shutdown: &mut watch::Receiver<bool>, recovery: bool) -> Result<Option<Task>, String> {
     if *shutdown.borrow() || app.lock().await.data.tasks.iter().any(|t| t.id == task.id && t.cancel) { return Err("Run stopped.".into()); }
+    if app.lock().await.data.codex_paused_until > now() { return Err(LIMIT_PAUSED.into()); }
     let mut recovery_state = task.clone();
     recovery_state.messages.clear();
     recovery_state.attention = Some("unconfirmed".into());
@@ -500,6 +536,7 @@ async fn run_codex(app: &App, task: &Task, project: &Project, settings: &Setting
     let mut stderr_done = false;
     let mut completed = false;
     let mut failed = false;
+    let mut limited = false;
     let mut tick = tokio::time::interval(std::time::Duration::from_millis(250));
     let mut last_checkpoint = now();
     loop {
@@ -507,6 +544,9 @@ async fn run_codex(app: &App, task: &Task, project: &Project, settings: &Setting
             line = out.next_line(), if !stdout_done => match line.map_err(|e| e.to_string())? {
                 Some(line) => if let Ok(value) = serde_json::from_str::<Value>(&line) {
                     if value["type"] == "turn.completed" { completed = true; }
+                    if matches!(value["type"].as_str(), Some("turn.failed" | "error")) && limit_error(&value.to_string()) {
+                        limited = true;
+                    }
                     update_task(app, &task.id, |t| {
                         if task.review_pending {
                             if !review_event(&mut recovery_state, &value) { failed = true; }
@@ -535,6 +575,10 @@ async fn run_codex(app: &App, task: &Task, project: &Project, settings: &Setting
         if stdout_done && stderr_done { break; }
     }
     let status = child.wait().await.map_err(|e| e.to_string())?;
+    if limited || ((!status.success() || !completed || failed) && limit_error(&stderr)) {
+        pause_for_limit(app, &settings.codex_path).await?;
+        return Err(LIMIT_PAUSED.into());
+    }
     if !status.success() || !completed || failed {
         return Err(format!("Codex did not finish successfully ({status}). {}", stderr.trim()));
     }
@@ -550,7 +594,7 @@ async fn run_codex(app: &App, task: &Task, project: &Project, settings: &Setting
 
 fn next_task(d: &Data) -> Option<usize> {
     let limit = if d.settings.parallelism { d.settings.max_workers } else { 1 };
-    if d.settings.paused || d.tasks.iter().filter(|t| t.status == "now").count() >= limit { return None; }
+    if d.settings.paused || d.codex_paused_until > now() || d.tasks.iter().filter(|t| t.status == "now").count() >= limit { return None; }
     d.tasks.iter().enumerate().filter(|(_, t)| t.status == "todo" && t.error.is_none()
         && !d.tasks.iter().any(|other| other.project_id == t.project_id
             && (((other.merging || (other.awaiting_merge && !d.settings.parallelism)) && t.worktree.is_none())
@@ -669,6 +713,7 @@ async fn merge_task(app: &App, task: &Task, project: &Project, settings: &Settin
             if git(&project.path, &["rev-parse", "--verify", "MERGE_HEAD"]).await.is_ok() {
                 git(&project.path, &["merge", "--abort"]).await?;
             }
+            if error == LIMIT_PAUSED { return Err(error); }
             return Err(format!("Merge failed. Automatic resolution could not finish; retry merge. {error}"));
         }
     }
@@ -683,7 +728,7 @@ async fn merge_worker(app: App, mut shutdown: watch::Receiver<bool>) {
         let job = {
             let mut store = app.lock().await;
             let mut d = store.data.clone();
-            let index = if d.settings.paused { None } else { d.tasks.iter().position(|t| t.awaiting_merge && !t.merging && t.error.is_none()
+            let index = if d.settings.paused || d.codex_paused_until > now() { None } else { d.tasks.iter().position(|t| t.awaiting_merge && !t.merging && t.error.is_none()
                 && !d.tasks.iter().any(|other| other.project_id == t.project_id && other.status == "now" && other.worktree.is_none())) };
             if let Some(index) = index {
                 d.tasks[index].merging = true;
@@ -705,6 +750,7 @@ async fn merge_worker(app: App, mut shutdown: watch::Receiver<bool>) {
                 t.merging = false;
                 match result {
                     Ok(()) => { t.awaiting_merge = false; t.error = None; t.message("system", "Merged into main."); }
+                    Err(e) if e == LIMIT_PAUSED => { t.error = None; t.message("system", e); }
                     Err(e) => { t.error = Some(e.clone()); t.message("system", e); }
                 }
             }).await { eprintln!("Cannot persist merge result: {e}"); }
@@ -756,6 +802,10 @@ async fn worker(app: App, mut shutdown: watch::Receiver<bool>) {
                             if pending { t.attention = None; }
                             t.awaiting_merge = !pending && t.attention.is_none() && t.worktree.is_some();
                             t.message("system", if pending { "Run ended. Your follow-up is queued." } else if t.attention.is_some() { "Task unfinished. Reply below to continue." } else { "Run completed." });
+                        }
+                        Err(e) if e == LIMIT_PAUSED && !t.cancel && !stopped => {
+                            t.status = "todo".into(); t.attention = None; t.error = None;
+                            t.message("system", e);
                         }
                         Err(e) if task.review_pending => {
                             t.status = if t.cancel || stopped { "future" } else { "done" }.into();
@@ -934,6 +984,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn codex_limits_pause_queue_and_preserve_manual_pause() {
+        let mut d = initial_data();
+        d.tasks.push(task("todo", 0));
+        d.codex_paused_until = now() + 60_000;
+        assert_eq!(next_task(&d), None);
+        let saved = serde_json::to_vec(&d).unwrap();
+        let mut d: Data = serde_json::from_slice(&saved).unwrap();
+        assert_eq!(next_task(&d), None);
+        d.codex_paused_until = now() - 1;
+        assert_eq!(next_task(&d), Some(0));
+        d.settings.paused = true;
+        assert_eq!(next_task(&d), None);
+        let mut legacy = serde_json::to_value(&d).unwrap();
+        legacy.as_object_mut().unwrap().remove("codex_paused_until");
+        assert_eq!(serde_json::from_value::<Data>(legacy).unwrap().codex_paused_until, 0);
+    }
+
+    #[test]
+    fn limit_errors_and_reset_windows() {
+        assert!(limit_error("You've hit your usage limit"));
+        assert!(limit_error("usage_limit_reached"));
+        assert!(limit_error("Rate limit exceeded"));
+        assert!(!limit_error("Command failed with exit code 1"));
+        let limits = json!({"rateLimits": {
+            "primary": {"usedPercent":100,"resetsAt":20},
+            "secondary": {"usedPercent":100,"resetsAt":30}
+        }});
+        assert_eq!(limit_reset(&limits, 10_000), Some(30_000));
+        assert_eq!(limit_reset(&limits, 30_000), None);
+        assert_eq!(limit_reset(&json!({"rateLimitsByLimitId":{"codex":{"primary":{"usedPercent":100,"resetsAt":40}}},"rateLimits":limits["rateLimits"]}), 10_000), Some(40_000));
+        assert_eq!(limit_reset(&json!({"rateLimits":{"primary":{"usedPercent":99,"resetsAt":40}}}), 10_000), None);
+        assert_eq!(limit_reset(&json!({}), 10_000), None);
+    }
+
     #[test]
     fn review_verdicts_execute_actions_and_ignore_commentary() {
         for decision in ["approve", "reject"] {
