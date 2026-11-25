@@ -52,8 +52,13 @@ function renderBoard() {
     return `<section class="column" data-status="${status}" aria-label="${status} tasks"><div class="column-head"><h2>${status[0].toUpperCase()+status.slice(1)} <span class="column-count">${items.length}</span></h2><button class="icon-button" data-new="${status === 'future' ? 'future' : 'todo'}" aria-label="Add task from ${status}">+</button></div><div class="column-tasks">${items.map(card).join('') || '<p class="empty-column">No tasks</p>'}</div></section>`;
   }).join('');
 }
+function difficultyBadge(t) {
+  const {easy_model, hard_model} = data.settings;
+  const difficulty = t.difficulty || (easy_model !== hard_model ? t.model === easy_model ? 'easy' : t.model === hard_model ? 'hard' : '' : '');
+  return ['easy', 'hard'].includes(difficulty) ? `<span class="task-difficulty ${difficulty}">${difficulty === 'easy' ? 'Easy' : 'Hard'}</span>` : '';
+}
 function card(t) {
-  return `<button class="task-card ${t.status==='now'?'running':''} ${needsAttention(t)?'needs-attention':''} ${t.awaiting_merge?'awaiting-merge':''}" data-task="${t.id}" draggable="${t.status!=='now'&&!t.awaiting_merge}"><h3>${escape(t.title)}</h3>${t.cleanup_at ? `<span class="approval-countdown" data-cleanup="${t.id}">${cleanupLabel(t)}</span>` : ''}<span class="card-meta">${!projectId ? '<span>'+escape(project(t.project_id)?.name)+'</span>' : ''}${t.awaiting_merge ? `<span>${t.merging?'Merging into main':t.error?'Merge needs attention':'Waiting to merge'}</span>` : ''}${needsAttention(t) ? `<span class="card-error">${escape(attentionLabel(t))}</span>` : ''}<span data-timer="${t.id}">${duration(elapsed(t))}</span></span></button>`;
+  return `<button class="task-card ${t.status==='now'?'running':''} ${needsAttention(t)?'needs-attention':''} ${t.awaiting_merge?'awaiting-merge':''}" data-task="${t.id}" draggable="${t.status!=='now'&&!t.awaiting_merge}"><h3>${escape(t.title)}</h3>${t.cleanup_at ? `<span class="approval-countdown" data-cleanup="${t.id}">${cleanupLabel(t)}</span>` : ''}<span class="card-meta">${difficultyBadge(t)}${!projectId ? '<span>'+escape(project(t.project_id)?.name)+'</span>' : ''}${t.awaiting_merge ? `<span>${t.merging?'Merging into main':t.error?'Merge needs attention':'Waiting to merge'}</span>` : ''}${needsAttention(t) ? `<span class="card-error">${escape(attentionLabel(t))}</span>` : ''}<span data-timer="${t.id}">${duration(elapsed(t))}</span></span></button>`;
 }
 function modal(title, body, wide = false, fullscreen = false) {
   const dialog = $('#dialog'); dialog.classList.toggle('wide', wide); dialog.classList.toggle('fullscreen', fullscreen);
@@ -124,7 +129,7 @@ function newTask(status = 'todo') {
   if (!data.projects.length) { addProject(); toast('Add your first project folder, then create a task.'); return; }
   modal('New task', `<form id="modal-form" class="new-task-form"><label class="field"><span>Title</span><input name="title" placeholder="What should the agent work on?" required autofocus maxlength="200"></label><div class="field instructions-field"><label for="task-instructions">Instructions</label><textarea id="task-instructions" name="text" placeholder="Describe the outcome, relevant details, and how to check the result..." required></textarea></div><div class="new-task-footer"><label class="field"><span>Project</span><select name="project_id">${data.projects.map(p=>`<option value="${p.id}" ${p.id===projectId?'selected':''}>${escape(p.name)}</option>`).join('')}</select></label><button type="submit" name="difficulty" value="hard" class="button primary">Hard</button><button type="submit" name="difficulty" value="easy" class="button primary" title="Create an easy task (Ctrl+Enter)">Easy</button></div><p class="form-error" id="form-error" role="alert"></p></form>`, false, true);
   const attachments = attachFiles($('#task-instructions'));
-  formSubmit(async (f, button) => { const model = data.settings[`${button?.value || 'easy'}_model`] || ''; await api({action:'create_task',...Object.fromEntries(f),model,status,attachments:await attachments.upload()}); });
+  formSubmit(async (f, button) => { const difficulty = button?.value || 'easy'; const model = data.settings[`${difficulty}_model`] || ''; await api({action:'create_task',...Object.fromEntries(f),difficulty,model,status,attachments:await attachments.upload()}); });
   $('#modal-form').onkeydown=e=>{if(e.key==='Enter'&&(e.ctrlKey||e.metaKey)){e.preventDefault();e.currentTarget.requestSubmit($('button[value="easy"]', e.currentTarget));}};
 }
 function openTask(key) {
@@ -132,7 +137,7 @@ function openTask(key) {
   selectedTask=key; lastMessages=''; const t=task(key); if(!t) return closeTask();
   $('#overlay').hidden=false; $('#task-panel').hidden=false;
   $('main').inert=true;
-  $('#task-panel').innerHTML=`<div class="panel-header"><h2 id="panel-title"></h2><details class="app-menu task-menu"><summary aria-label="Task menu" title="Task menu"><span class="burger"></span></summary><div class="menu-items"><label class="field"><span>Model</span><select id="task-model" aria-label="Task model">${modelOptions(t.model)}</select></label><button id="task-agents">AGENTS.md</button><button id="edit-task">Edit title</button><button id="delete-task">Delete task</button><button id="stop-task" hidden>Stop</button></div></details><button id="approve-task" class="button primary small" title="Approve and clean up this task and its Codex session in 30 minutes. Project files stay." hidden>Approve</button><button id="revive-task" class="button small" title="Cancel cleanup" hidden>Revive</button><button id="close-task" class="icon-button" aria-label="Close task">×</button></div><div class="messages" id="messages"></div><form class="composer" id="message-form"><textarea id="message-input" placeholder="Add details or ask Codex to continue…" aria-label="Message to Codex" required></textarea></form>`;
+  $('#task-panel').innerHTML=`<div class="panel-header"><h2 id="panel-title"></h2><span id="panel-difficulty"></span><details class="app-menu task-menu"><summary aria-label="Task menu" title="Task menu"><span class="burger"></span></summary><div class="menu-items"><label class="field"><span>Model</span><select id="task-model" aria-label="Task model">${modelOptions(t.model)}</select></label><button id="task-agents">AGENTS.md</button><button id="edit-task">Edit title</button><button id="delete-task">Delete task</button><button id="stop-task" hidden>Stop</button></div></details><button id="approve-task" class="button primary small" title="Approve and clean up this task and its Codex session in 30 minutes. Project files stay." hidden>Approve</button><button id="revive-task" class="button small" title="Cancel cleanup" hidden>Revive</button><button id="close-task" class="icon-button" aria-label="Close task">×</button></div><div class="messages" id="messages"></div><form class="composer" id="message-form"><textarea id="message-input" placeholder="Add details or ask Codex to continue…" aria-label="Message to Codex" required></textarea></form>`;
   $('#close-task').onclick=closeTask;
   $('#task-model').onchange=async e=>{await act({action:'edit_task',id:key,title:task(key).title,model:e.target.value});refreshPanel();};
   $('#task-agents').onclick=()=>openAgents(t.project_id);
@@ -165,6 +170,7 @@ function openTask(key) {
 function refreshPanel() {
   const t=task(selectedTask);if(!t)return closeTask();
   $('#panel-title').textContent=t.title;$('#panel-title').title=t.title;
+  $('#panel-difficulty').innerHTML=difficultyBadge(t);
   $('#task-model').disabled=t.status==='now'||t.merging;$('#task-model').value=t.model;
   $('#edit-task').disabled=t.status==='now'||t.merging;$('#delete-task').disabled=t.status==='now'||t.awaiting_merge;
   $('#stop-task').hidden=t.status!=='now';$('#stop-task').disabled=t.cancel;$('#stop-task').textContent=t.cancel?'Stopping…':'Stop';

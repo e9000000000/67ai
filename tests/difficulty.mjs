@@ -22,11 +22,13 @@ const fields = new Map([['title','Task'],['text','Instructions'],['project_id','
 for (const difficulty of ['hard','easy']) {
   await submit(fields, {value:difficulty});
   assert.equal(action.model, `${difficulty}-model`);
+  assert.equal(action.difficulty, difficulty);
   assert.equal(action.status, 'future');
   assert.equal(action.attachments[0], 'attachment');
 }
 await submit(fields);
 assert.equal(action.model, 'easy-model');
+assert.equal(action.difficulty, 'easy');
 context.data.settings.easy_model = '';
 await submit(fields, {value:'easy'});
 assert.equal(action.model, '');
@@ -49,4 +51,18 @@ assert.match(markup, /Hard task model/);
 assert.match(markup, /Easy task model/);
 assert.doesNotMatch(markup, /default_model|Default model|Use default model/);
 assert.match(markup, /Use Codex configuration/);
+runInNewContext(source.slice(source.indexOf('function difficultyBadge('), source.indexOf('function modal(')), context);
+for (const difficulty of ['easy','hard']) {
+  assert.match(context.difficultyBadge({difficulty,model:'custom-model'}), new RegExp(`class="task-difficulty ${difficulty}"`));
+  assert.match(context.difficultyBadge({model:`${difficulty}-model`}), new RegExp(`>${difficulty === 'easy' ? 'Easy' : 'Hard'}<`));
+}
+assert.equal(context.difficultyBadge({model:'unknown-model'}), '');
+context.data.settings.hard_model = 'easy-model';
+assert.equal(context.difficultyBadge({model:'easy-model'}), '');
+assert.match(context.difficultyBadge({difficulty:'hard',model:'easy-model'}), />Hard</);
+context.project = ()=>({name:'Project'});
+context.needsAttention = ()=>false;
+context.elapsed = ()=>0;
+context.duration = ()=>'0s';
+assert.match(context.card({id:'t',title:'Task',difficulty:'easy',status:'todo'}), /class="task-difficulty easy">Easy</);
 console.log('Task difficulty and model settings checks passed');

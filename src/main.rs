@@ -56,11 +56,15 @@ async fn attachment(State(app): State<App>, Path(key): Path<String>) -> Result<i
     Ok(([("content-type", kind.to_string()), ("x-content-type-options", "nosniff".into())], body))
 }
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum Difficulty { Easy, Hard }
+#[derive(Clone, Serialize, Deserialize)]
 struct Task {
     id: String, project_id: String, title: String, model: String, status: String,
     messages: Vec<Message>, created_at: u64, queued_at: u64, elapsed_ms: u64,
     started_at: Option<u64>, thread_id: Option<String>, error: Option<String>,
     sent_count: usize, cancel: bool,
+    #[serde(default)] difficulty: Option<Difficulty>,
     #[serde(default)] cleanup_at: Option<u64>,
     #[serde(default)] attention: Option<String>,
     #[serde(default)] worktree: Option<String>,
@@ -139,7 +143,7 @@ async fn state(State(app): State<App>) -> Json<Value> {
 #[serde(tag = "action", rename_all = "snake_case")]
 enum Action {
     AddProject { name: String, path: String },
-    CreateTask { project_id: String, title: String, text: String, model: String, status: String, #[serde(default)] attachments: Vec<String> },
+    CreateTask { project_id: String, title: String, text: String, model: String, status: String, #[serde(default)] difficulty: Option<Difficulty>, #[serde(default)] attachments: Vec<String> },
     EditTask { id: String, title: String, model: String },
     MoveTask { id: String, status: String },
     SendMessage { id: String, text: String, #[serde(default)] attachments: Vec<String> },
@@ -179,12 +183,12 @@ async fn action(State(app): State<App>, Json(action): Json<Action>) -> ApiResult
             let project = Project { id: id(), name: name.trim().into(), path };
             result = json!({"id": project.id}); d.projects.push(project);
         }
-        Action::CreateTask { project_id, title, text, model, status, attachments } => {
+        Action::CreateTask { project_id, title, text, model, status, difficulty, attachments } => {
             let attachments = load_attachments(&store, attachments)?;
             nonempty(&title, "Title")?; if attachments.is_empty() { nonempty(&text, "Task instructions")?; } valid_status(&status)?;
             if status == "done" { return Err(bad("New tasks must start in future or todo")); }
             if !d.projects.iter().any(|p| p.id == project_id) { return Err(bad("Project not found")); }
-            let mut task = Task { id: id(), project_id, title: title.trim().into(), model, status, messages: vec![], created_at: now(), queued_at: now(), elapsed_ms: 0, started_at: None, thread_id: None, error: None, sent_count: 0, cancel: false, cleanup_at: None, attention: None, worktree: None, awaiting_merge: false, merging: false };
+            let mut task = Task { id: id(), project_id, title: title.trim().into(), model, status, difficulty, messages: vec![], created_at: now(), queued_at: now(), elapsed_ms: 0, started_at: None, thread_id: None, error: None, sent_count: 0, cancel: false, cleanup_at: None, attention: None, worktree: None, awaiting_merge: false, merging: false };
             task.message("user", text.trim()); task.messages.last_mut().unwrap().attachments = attachments;
             result = json!({"id": task.id}); d.tasks.push(task);
         }
@@ -804,6 +808,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn difficulty_survives_reload_and_accepts_older_tasks() {
+        for (name, difficulty) in [("easy", Difficulty::Easy), ("hard", Difficulty::Hard)] {
+            let mut t = task("future", 0);
+            t.difficulty = Some(difficulty);
+            let mut saved = serde_json::to_value(&t).unwrap();
+            assert_eq!(saved["difficulty"], name);
+            let loaded: Task = serde_json::from_value(saved.clone()).unwrap();
+            assert_eq!(serde_json::to_value(loaded).unwrap()["difficulty"], name);
+            saved.as_object_mut().unwrap().remove("difficulty");
+            assert!(serde_json::from_value::<Task>(saved).unwrap().difficulty.is_none());
+        }
+        assert!(serde_json::from_value::<Difficulty>(json!("other")).is_err());
+    }
     #[tokio::test]
     async fn approval_revive_feedback_restart_and_expiry() {
         let dir = std::env::current_dir().unwrap().join("test-results").join(format!("approval-{}", id()));
@@ -862,7 +880,7 @@ mod tests {
         let app = Arc::new(Mutex::new(Store { data, file: dir.join("67ai.json") }));
         let Json(uploaded) = upload(State(app.clone()), axum::extract::Query(Upload { name: "notes.txt".into(), media_type: "text/plain".into() }), axum::body::Bytes::from_static(b"file contents")).await.unwrap();
         let key = uploaded["id"].as_str().unwrap().to_string();
-        let Json(created) = action(State(app.clone()), Json(Action::CreateTask { project_id: "p".into(), title: "Files".into(), text: "".into(), model: "".into(), status: "future".into(), attachments: vec![key.clone()] })).await.unwrap();
+        let Json(created) = action(State(app.clone()), Json(Action::CreateTask { project_id: "p".into(), title: "Files".into(), text: "".into(), model: "".into(), status: "future".into(), difficulty: None, attachments: vec![key.clone()] })).await.unwrap();
         let task_id = created["id"].as_str().unwrap().to_string();
         let _ = action(State(app.clone()), Json(Action::SendMessage { id: task_id.clone(), text: "".into(), attachments: vec![key.clone()] })).await.unwrap();
         assert!(action(State(app.clone()), Json(Action::SendMessage { id: task_id.clone(), text: "".into(), attachments: vec![] })).await.is_err());
@@ -878,7 +896,7 @@ mod tests {
         assert!(old.attachments.is_empty());
     }
     fn task(status: &str, queued_at: u64) -> Task {
-        Task { id: id(), project_id: "p".into(), title: "Test".into(), model: "".into(), status: status.into(), messages: vec![], created_at: 0, queued_at, elapsed_ms: 0, started_at: None, thread_id: None, error: None, sent_count: 0, cancel: false, cleanup_at: None, attention: None, worktree: None, awaiting_merge: false, merging: false }
+        Task { id: id(), project_id: "p".into(), title: "Test".into(), model: "".into(), status: status.into(), difficulty: None, messages: vec![], created_at: 0, queued_at, elapsed_ms: 0, started_at: None, thread_id: None, error: None, sent_count: 0, cancel: false, cleanup_at: None, attention: None, worktree: None, awaiting_merge: false, merging: false }
     }
     #[test]
     fn queue_is_fifo_and_sequential_by_default() {
