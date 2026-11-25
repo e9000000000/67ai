@@ -4,7 +4,7 @@ A local Rust server and compact dark Kanban board for Codex. No Node build, host
 
 ## Run on Windows
 
-Download `67ai.exe` from [GitHub Releases](https://github.com/e9000000000/67ai/releases), run it from a writable folder, and open http://127.0.0.1:3030. Install Codex CLI and log in first. The downloaded executable does not require Rust; its UI is embedded. Data is saved in the working directory's `data` folder unless `67AI_DATA_DIR` is set.
+Download `67ai.exe` from [GitHub Releases](https://github.com/e9000000000/67ai/releases), run it from a writable folder. It runs in the Windows notification tray without a console window. Right-click its icon and choose **Open in browser** to open the board, or **Exit** to stop the server and active runs. No browser tab opens automatically. Install Codex CLI and log in first. The downloaded executable does not require Rust; its UI is embedded. Data is saved in the working directory's `data` folder unless `67AI_DATA_DIR` is set.
 
 ### Build from source
 
@@ -14,7 +14,7 @@ Install Rust and Codex CLI, then run `codex login` if needed. From this folder:
 .\start.ps1
 ```
 
-Open http://127.0.0.1:3030. The launcher builds the release executable and starts it in the current terminal. Ctrl+C stops the server and its active runs. For development, use `cargo run`. The HTML, CSS and JavaScript are embedded in the executable, so rebuild after editing them.
+Open http://127.0.0.1:3030. The launcher builds the single release executable and starts it in the tray. Use the tray menu to open the board or exit. Debug builds retain the console and Ctrl+C shutdown. For development, use `cargo run`. The HTML, CSS and JavaScript are embedded in the executable, so rebuild after editing them.
 
 After changes, run `.\restart.ps1` to stop this checkout's existing server, rebuild the release version, start it in the background, and open your default browser when it is ready. This interrupts any running task; interrupted tasks return to Future. The script respects `67AI_PORT` and `67AI_DATA_DIR`.
 

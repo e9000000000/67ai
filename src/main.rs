@@ -1,3 +1,8 @@
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
+#[cfg(windows)]
+mod tray;
+
 use axum::{Json, Router, extract::{Path, State}, http::{HeaderMap, StatusCode}, response::{Html, IntoResponse}, routing::{get, post}};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -957,6 +962,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut store = Store { data: data.clone(), file }; store.commit(data)?;
     let app: App = Arc::new(Mutex::new(store));
     let (stop, shutdown) = watch::channel(false);
+    #[cfg(windows)]
+    let _tray = tray::Tray::start(port, stop.clone())?;
+    let mut exit = shutdown.clone();
     let cleanup = tokio::spawn(cleanup_worker(app.clone(), shutdown.clone()));
     let merger = tokio::spawn(merge_worker(app.clone(), shutdown.clone()));
     let worker = tokio::spawn(worker(app.clone(), shutdown));
@@ -974,7 +982,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .layer(axum::extract::DefaultBodyLimit::max(2 * 1024 * 1024))
         .layer(axum::middleware::from_fn(local_only)).with_state(app);
     println!("67ai running at http://127.0.0.1:{port}");
-    axum::serve(listener, router).with_graceful_shutdown(async move { let _ = tokio::signal::ctrl_c().await; let _ = stop.send(true); }).await?;
+    axum::serve(listener, router).with_graceful_shutdown(async move { tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = exit.changed() => {} } let _ = stop.send(true); }).await?;
     let _ = worker.await;
     let _ = merger.await;
     let _ = cleanup.await;
