@@ -41,7 +41,8 @@ async fn worktrees(project: &Project) -> Result<Vec<Worktree>, String> {
 
 async fn remove_worktree(project: &Project, tree: &Worktree) -> Result<(), String> {
     if path_key(&tree.path) == path_key(&project.path) { return Err("Cannot remove the project folder".into()); }
-    git(&project.path, &["worktree", "remove", "--force", &tree.path]).await?;
+    // Git for Windows otherwise fails to delete deeply nested files (MAX_PATH).
+    git(&project.path, &["-c", "core.longpaths=true", "worktree", "remove", "--force", &tree.path]).await?;
     if let Some(branch) = &tree.branch {
         if branch.starts_with("67ai/") || branch.starts_with("taskdesk/") {
             git(&project.path, &["branch", "-D", branch]).await?;

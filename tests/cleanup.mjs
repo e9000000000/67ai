@@ -13,6 +13,7 @@ function git(...args) {
   assert.equal(r.status,0,r.stderr); return r.stdout.trim();
 }
 git('init','-b','main'); git('config','user.name','Test'); git('config','user.email','test@example.com');
+git('config','core.longpaths','false');
 await writeFile(path.join(repo,'base.txt'),'base'); git('add','.'); git('commit','-m','Initial');
 const fake=path.join(root,'fake-codex.exe');
 assert.equal(spawnSync('rustc',['tests/fake_codex.rs','-o',fake],{stdio:'inherit',windowsHide:true}).status,0);
@@ -40,6 +41,13 @@ try{
   const taskId=await create('Delete me'), keepId=await create('Keep me'), expiredId=await create('Expired');
   const tree=path.join(root,'worktrees',taskId), keepTree=path.join(root,'worktrees',keepId), orphanTree=path.join(root,'worktrees','orphan'), expiredTree=path.join(root,'worktrees',expiredId);
   for(const [id,dir] of [[taskId,tree],[keepId,keepTree],['orphan',orphanTree],[expiredId,expiredTree]])git('worktree','add','-b',`67ai/${id}`,dir,'main');
+  const longFiles=[];
+  for(const dir of [tree,keepTree,orphanTree,expiredTree]){
+    const nested=path.join(dir,...Array(8).fill('deeply-nested-directory'));
+    const file=path.join(nested,'untracked.txt');
+    assert(file.length>260); await mkdir(nested,{recursive:true}); await writeFile(file,'Long path cleanup regression');
+    longFiles.push(file);
+  }
   await writeFile(path.join(tree,'untracked.txt'),'Discard with task');
   await seed(d=>{
     Object.assign(d.tasks.find(t=>t.id===taskId),{worktree:tree,thread_id:'original',session_ids:['original','review','recovery']});
@@ -62,6 +70,7 @@ try{
   const ids=await deleted(); for(const id of ['loose','orphan','nested','archived'])assert(ids.includes(id));
   for(const id of ['keep','keep-review','other','prefix','escaped'])assert(!ids.includes(id));
   assert(!await exists(orphanTree)); assert(await exists(repo)); assert(await exists(keepTree)); assert(!git('branch','--list','67ai/orphan'));
+  assert(await exists(longFiles[1])); assert.equal(git('config','--get','core.longpaths'),'false');
   await action({action:'clear_project',id:'missing'},400);
   // Existing tasks can share a session in migrated data; deleting one must preserve it.
   const shared=await create('Shared session');
@@ -82,5 +91,5 @@ try{
   runInNewContext(source.slice(source.indexOf('function clearProject('),source.indexOf('function genTask(')),ui); ui.clearProject();
   assert.match(markup,/selected/); assert.match(markup,/Uncommitted files/); await submit(new Map([['id',project_id]])); assert.equal(saved.action,'clear_project'); assert.equal(saved.id,project_id);
   assert.match(await readFile('web/index.html','utf8'),/id="clear-project-button"/);
-  console.log('PASS: task and timed deletion, auxiliary sessions, failure retention, project-scoped paginated/archived cleanup, assigned resources, UI form.');
+  console.log('PASS: long-path task/timed/unused worktree deletion, auxiliary sessions, failure retention, project-scoped paginated/archived cleanup, assigned resources, UI form.');
 }finally{if(server)await stop();}
