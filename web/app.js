@@ -18,7 +18,8 @@ function renderWeeklyLimit(result) {
   const week = [limits?.primary, limits?.secondary].find(w => w?.windowDurationMins === 7 * 24 * 60);
   const available = typeof week?.usedPercent === 'number' && Number.isFinite(week.usedPercent);
   const remaining = available ? Math.max(0, Math.min(100, 100 - week.usedPercent)) : null;
-  el.textContent = available ? `Codex weekly: ${Number(remaining.toFixed(1))}% left` : 'Codex weekly: unavailable';
+  const reset = week?.resetsAt ? new Date(week.resetsAt * 1000).toLocaleString(undefined, {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'}) : '';
+  el.textContent = available ? `Codex weekly: ${Number(remaining.toFixed(1))}% left${reset ? ` · Resets ${reset}` : ''}` : 'Codex weekly: unavailable';
   el.title = available ? `Weekly Codex limit remaining${week.resetsAt ? `. Resets ${new Date(week.resetsAt * 1000).toLocaleString()}` : ''}` : result.error || 'No weekly limit reported for this Codex account.';
   el.classList.toggle('low', available && remaining <= 10);
 }
