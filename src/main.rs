@@ -902,7 +902,7 @@ async fn resolve_merge(app: &App, task: &Task, project: &Project, settings: &Set
     git(&project.path, &["commit", "--no-edit"]).await?;
     Ok(())
 }
-async fn merge_task(app: &App, task: &Task, project: &Project, settings: &Settings, shutdown: &mut watch::Receiver<bool>) -> Result<(), String> {
+async fn merge_task(app: &App, task: &Task, project: &Project, settings: &Settings, shutdown: &mut watch::Receiver<bool>) -> Result<String, String> {
     let path = task.worktree.as_deref().ok_or("Missing task worktree")?;
     require_main(project).await?;
     let branch = git(path, &["branch", "--show-current"]).await?;
@@ -929,7 +929,7 @@ async fn merge_task(app: &App, task: &Task, project: &Project, settings: &Settin
     require_main(project).await?;
     git(&project.path, &["merge-base", "--is-ancestor", &main_head, "HEAD"]).await?;
     git(&project.path, &["merge-base", "--is-ancestor", &task_head, "HEAD"]).await?;
-    Ok(())
+    git(&project.path, &["rev-parse", "HEAD"]).await
 }
 async fn merge_worker(app: App, mut shutdown: watch::Receiver<bool>) {
     loop {
@@ -958,7 +958,7 @@ async fn merge_worker(app: App, mut shutdown: watch::Receiver<bool>) {
             if let Err(e) = update_task(&app, &task.id, |t| {
                 t.merging = false;
                 match result {
-                    Ok(()) => { t.awaiting_merge = false; t.error = None; t.message("system", "Merged into main."); }
+                    Ok(head) => { t.awaiting_merge = false; t.error = None; t.message("system", format!("Merged into main.\nCommit: {head}\nProject: {}\nRunning servers and previews are not restarted by a merge.", project.path)); }
                     Err(e) if e == LIMIT_PAUSED => { t.error = None; t.message("system", e); }
                     Err(e) => { t.error = Some(e.clone()); t.message("system", e); }
                 }

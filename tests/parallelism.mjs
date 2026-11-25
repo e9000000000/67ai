@@ -28,6 +28,14 @@ const orange=ui.card({id:'t',title:'Completed',status:'done',awaiting_merge:true
 assert.match(orange,/awaiting-merge/); assert.match(orange,/Merge needs attention/);
 assert.match(orange,/draggable="false"/); assert.doesNotMatch(orange,/needs-attention/);
 assert.doesNotMatch(ui.card({id:'t',title:'Merged',status:'done'}),/awaiting-merge/);
+const receipt={role:'system',text:'Merged into main.\nCommit: abc123\nProject: C:\\project'};
+const completed={id:'t',title:'Completed',status:'done',messages:[{role:'system',text:'Codex started working.'},receipt]};
+assert.match(ui.card(completed),/class="merge-receipt"/);
+assert.match(ui.card(completed),/Commit: abc123/);
+assert.match(ui.mergeReceipt({...completed,messages:[{role:'system',text:'Merged into main.'}]}),/>Merged into main</);
+for(const changed of [{status:'todo'},{status:'now'},{awaiting_merge:true},{merging:true},{attention:'blocked'},{error:'failed'},
+  {messages:[receipt,{role:'system',text:'Codex started working.'}]}])assert.equal(ui.mergeReceipt({...completed,...changed}),'');
+assert.equal(ui.mergeReceipt({...completed,messages:[{role:'assistant',text:'Merged into main.'}]}),'');
 
 const root = path.resolve('tmp', `parallelism-${Date.now()}`);
 await mkdir(root, {recursive:true});
@@ -48,7 +56,7 @@ const fake = path.join(root, 'fake-codex.exe');
 assert.equal(spawnSync('rustc', ['tests/fake_codex.rs', '-o', fake], {stdio:'inherit', windowsHide:true}).status, 0);
 const url = 'http://127.0.0.1:3034';
 const delay = ms => new Promise(resolve=>setTimeout(resolve,ms));
-let server;
+let server, presenceTimer;
 async function state() { return (await (await fetch(`${url}/api/state`)).json()).data; }
 async function action(body, expected=200) {
   const r = await fetch(`${url}/api/action`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
@@ -62,10 +70,15 @@ async function until(predicate) {
 async function start() {
   server=spawn(path.resolve('target/debug/67ai.exe'), [], {env:{...process.env,'67AI_PORT':'3034','67AI_DATA_DIR':root,'67AI_CODEX':fake},windowsHide:true,stdio:['ignore','ignore','pipe']});
   server.stderr.on('data', b=>process.stderr.write(b));
-  for(let i=0;i<50;i++) { try { await state(); return; } catch { await delay(100); } }
+  for(let i=0;i<50;i++) { try {
+    await state();
+    // Keep this isolated test server silent through the normal focus suppression.
+    const presence=()=>fetch(`${url}/api/presence`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:'silent-test',focused:true,rendered_at:0})}).catch(()=>{});
+    await presence(); presenceTimer=setInterval(presence,500); return;
+  } catch { await delay(100); } }
   throw Error('Server did not start');
 }
-async function stop() { const exited=new Promise(resolve=>server.once('exit',resolve)); server.kill(); await exited; }
+async function stop() { clearInterval(presenceTimer); const exited=new Promise(resolve=>server.once('exit',resolve)); server.kill(); await exited; }
 try {
   await start();
   let d=await state();
@@ -138,6 +151,10 @@ try {
   assert(merged.session_ids.includes('parallel-test'));assert(merged.session_ids.includes('merge-repair'));
   assert.equal(merged.attention,null);
   assert(merged.messages.some(m=>m.text.includes('Resolving merge conflicts automatically')));
+  const mergeMessage=merged.messages.findLast(m=>m.role==='system'&&m.text.startsWith('Merged into main.'));
+  assert(mergeMessage.text.includes(`Commit: ${git(repo,'rev-parse','HEAD')}`));
+  assert(mergeMessage.text.includes(`Project: ${repo}`));
+  assert(mergeMessage.text.includes('not restarted'));
   assert.equal(await readFile(path.join(repo,'base.txt'),'utf8'),'main edit\ntask edit\n');
   assert.equal(git(repo,'status','--porcelain'),'');
   git(repo,'merge-base','--is-ancestor',git(tree,'rev-parse','HEAD'),'HEAD');
@@ -171,6 +188,14 @@ try {
     try {
       const page=await browser.newPage({viewport:{width:1280,height:900}});
       await page.goto(url);
+      const mergedCard=page.locator(`[data-task="${conflict}"]`);
+      await mergedCard.locator('.merge-receipt').waitFor();
+      assert.match(await mergedCard.locator('.merge-receipt').getAttribute('title'),/Commit: [0-9a-f]{40}/);
+      await mergedCard.click();
+      await page.locator('#panel-difficulty .merge-receipt').waitFor();
+      assert.equal(await page.locator('#panel-difficulty .merge-receipt').innerText(),'Merged into main');
+      await page.screenshot({path:path.join(root,'merge-receipt.png')});
+      await page.locator('#close-task').click();
       await page.locator('header .app-menu > summary').click();
       await page.getByRole('button',{name:'New task',exact:true}).click();
       assert.deepEqual(await page.locator('[name="execution_mode"] option').allTextContents(),['parallel-worktree','parallel-raw']);

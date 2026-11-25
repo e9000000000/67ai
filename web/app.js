@@ -85,8 +85,17 @@ function contentHold(t) {
   return p.decision!=='accepted'||!p.sample_ready?'Waiting for a ready, accepted sample':'';
 }
 
+function mergeReceipt(t) {
+  if(t.status!=='done'||t.awaiting_merge||t.merging||t.attention||t.error)return '';
+  for(const m of [...(t.messages||[])].reverse()) {
+    if(m.role!=='system')continue;
+    if(m.text==='Codex started working.')return '';
+    if(m.text==='Merged into main.'||m.text.startsWith('Merged into main.\n'))return `<span class="merge-receipt" title="${escape(m.text)}">Merged into main</span>`;
+  }
+  return '';
+}
 function card(t) {
-  return `<button class="task-card ${t.status==='now'?'running':''} ${needsAttention(t)?'needs-attention':''} ${t.awaiting_merge?'awaiting-merge':''}" data-task="${t.id}" draggable="${t.status!=='now'&&!t.awaiting_merge}"><h3>${escape(t.title)}</h3>${t.cleanup_at ? `<span class="approval-countdown" data-cleanup="${t.id}">${cleanupLabel(t)}</span>` : ''}<span class="card-meta">${difficultyBadge(t)}${!projectId ? '<span>'+escape(project(t.project_id)?.name)+'</span>' : ''}${contentHold(t) ? `<span>${escape(contentHold(t))}</span>` : ''}${t.blocker_id ? `<span>Blocker: ${escape(data.tasks?.find(b=>b.id===t.blocker_id)?.title || 'Missing task')}</span>` : ''}${t.review_pending ? '<span>AI review '+(t.status==='now'?'running':t.error?'interrupted':'queued')+'</span>' : ''}${t.awaiting_merge ? `<span>${t.merging?'Merging into main':t.error?'Merge needs attention':'Waiting to merge'}</span>` : ''}${needsAttention(t) ? `<span class="card-error">${escape(attentionLabel(t))}</span>` : ''}<span data-timer="${t.id}">${duration(elapsed(t))}</span></span></button>`;
+  return `<button class="task-card ${t.status==='now'?'running':''} ${needsAttention(t)?'needs-attention':''} ${t.awaiting_merge?'awaiting-merge':''}" data-task="${t.id}" draggable="${t.status!=='now'&&!t.awaiting_merge}"><h3>${escape(t.title)}</h3>${t.cleanup_at ? `<span class="approval-countdown" data-cleanup="${t.id}">${cleanupLabel(t)}</span>` : ''}<span class="card-meta">${difficultyBadge(t)}${mergeReceipt(t)}${!projectId ? '<span>'+escape(project(t.project_id)?.name)+'</span>' : ''}${contentHold(t) ? `<span>${escape(contentHold(t))}</span>` : ''}${t.blocker_id ? `<span>Blocker: ${escape(data.tasks?.find(b=>b.id===t.blocker_id)?.title || 'Missing task')}</span>` : ''}${t.review_pending ? '<span>AI review '+(t.status==='now'?'running':t.error?'interrupted':'queued')+'</span>' : ''}${t.awaiting_merge ? `<span>${t.merging?'Merging into main':t.error?'Merge needs attention':'Waiting to merge'}</span>` : ''}${needsAttention(t) ? `<span class="card-error">${escape(attentionLabel(t))}</span>` : ''}<span data-timer="${t.id}">${duration(elapsed(t))}</span></span></button>`;
 }
 function modal(title, body, wide = false, fullscreen = false) {
   const dialog = $('#dialog'); dialog.classList.toggle('wide', wide); dialog.classList.toggle('fullscreen', fullscreen);
@@ -289,7 +298,7 @@ function openTask(key) {
 function refreshPanel() {
   const t=task(selectedTask);if(!t)return closeTask();
   $('#panel-title').textContent=t.title;$('#panel-title').title=t.title;
-  $('#panel-difficulty').innerHTML=difficultyBadge(t);
+  $('#panel-difficulty').innerHTML=difficultyBadge(t)+mergeReceipt(t);
   const options=blockerOptions(t);if($('#task-blocker').innerHTML!==options)$('#task-blocker').innerHTML=options;
   $('#task-blocker').disabled=t.status==='now'||t.merging;
   $('#task-blocker-status').textContent=blockerStatus(t);$('#task-blocker-status').hidden=!t.blocker_id;
