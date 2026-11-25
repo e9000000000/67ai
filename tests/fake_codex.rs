@@ -34,6 +34,11 @@ fn main() {
         assert!(prompt.contains("inspect its rendered appearance"));
         assert!(prompt.contains("Do not edit implementation files"));
         assert!(prompt.contains("Report what you tested"));
+        assert!(prompt.contains("67ai executes your verdict automatically"));
+        let schema_index = args.iter().position(|a| a == "--output-schema").unwrap();
+        let schema = std::fs::read_to_string(&args[schema_index + 1]).unwrap();
+        assert!(schema.contains("\"approve\"") && schema.contains("\"reject\""));
+        assert!(!schema.contains("\"completed\""));
         assert!(!prompt.contains("relevant read-only checks"));
         println!(r#"{{"type":"thread.started","thread_id":"review-session"}}"#);
         std::io::stdout().flush().unwrap();
@@ -42,8 +47,9 @@ fn main() {
         if prompt.contains("REVIEW_INVALID") {
             println!(r#"{{"type":"item.completed","item":{{"type":"agent_message","text":"No decision"}}}}"#);
         } else {
-            let outcome = if prompt.contains("REVIEW_FEEDBACK") { "blocked" } else { "completed" };
-            println!(r#"{{"type":"item.completed","item":{{"type":"agent_message","text":"{{\"outcome\":\"{outcome}\",\"message\":\"Review verdict\"}}"}}}}"#);
+            let decision = if prompt.contains("REVIEW_FEEDBACK") { "reject" } else { "approve" };
+            println!(r#"{{"type":"item.completed","item":{{"type":"agent_message","text":"{{\"decision\":\"{decision}\",\"message\":\"Review verdict\"}}"}}}}"#);
+            println!(r#"{{"type":"item.completed","item":{{"type":"agent_message","text":"Review finished."}}}}"#);
         }
         println!(r#"{{"type":"turn.completed"}}"#);
         return;

@@ -1,0 +1,16 @@
+{
+  "type": "object",
+  "properties": {
+    "decision": {
+      "type": "string",
+      "enum": ["approve", "reject"],
+      "description": "Choose approve only when the original task is correct and verified. Otherwise choose reject, including when verification is blocked. Completing the review itself is not approval."
+    },
+    "message": {
+      "type": "string",
+      "description": "Explain the checks and findings. For reject, give concrete instructions to the original agent, who will automatically resume with this message. For approve, this message accompanies automatic task approval."
+    }
+  },
+  "required": ["decision", "message"],
+  "additionalProperties": false
+}

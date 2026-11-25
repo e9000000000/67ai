@@ -56,6 +56,9 @@ try {
   await action({action:'settings',...d.settings,paused:false});
   await until(d=>d.tasks.find(t=>t.id===feedback)?.status==='done');
   assert.match(await readFile(path.join(root,'last-prompt.txt'),'utf8'),/reviewer: Review verdict/);
+  const args=await readFile(path.join(root,'last-args.json'),'utf8');
+  assert.match(args,/"resume", "11111111-1111-4111-8111-111111111111"/);
+  assert.match(args,/"--model", "easy-model"/);
 
   const race=await create();
   await action({action:'ai_approve_task',id:race});
