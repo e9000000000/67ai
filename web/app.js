@@ -12,6 +12,24 @@ const elapsed = t => t.elapsed_ms + (t.started_at ? Math.max(0, Date.now()+serve
 function toast(text) { $('#toast').textContent = text; $('#toast').hidden = false; clearTimeout(toast.timer); toast.timer = setTimeout(() => $('#toast').hidden = true, 4500); }
 async function api(action) { const res = await fetch('/api/action', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(action)}); if (!res.ok) throw Error(await res.text()); const result = await res.json(); await refresh(); return result; }
 async function act(action) { try { return await api(action); } catch (e) { toast(e.message); } }
+function renderWeeklyLimit(result) {
+  const el = $('#weekly-limit');
+  const limits = result.rateLimitsByLimitId?.codex ?? result.rateLimits;
+  const week = [limits?.primary, limits?.secondary].find(w => w?.windowDurationMins === 7 * 24 * 60);
+  const available = typeof week?.usedPercent === 'number' && Number.isFinite(week.usedPercent);
+  const remaining = available ? Math.max(0, Math.min(100, 100 - week.usedPercent)) : null;
+  el.textContent = available ? `Codex weekly: ${Number(remaining.toFixed(1))}% left` : 'Codex weekly: unavailable';
+  el.title = available ? `Weekly Codex limit remaining${week.resetsAt ? `. Resets ${new Date(week.resetsAt * 1000).toLocaleString()}` : ''}` : result.error || 'No weekly limit reported for this Codex account.';
+  el.classList.toggle('low', available && remaining <= 10);
+}
+async function pollLimits() {
+  try {
+    const res = await fetch('/api/rate-limits');
+    if (!res.ok) throw Error('Could not read Codex usage.');
+    renderWeeklyLimit(await res.json());
+  } catch (e) { renderWeeklyLimit({error:e.message}); }
+  setTimeout(pollLimits, 60000);
+}
 async function refresh() {
   const res = await fetch('/api/state'); if (!res.ok) throw Error(await res.text());
   const result = await res.json(); data = result.data; models = result.models; serverOffset = result.server_time-Date.now();
@@ -229,4 +247,5 @@ document.onkeydown=e=>{
 };
 setInterval(()=>{if(!data)return;document.querySelectorAll('[data-cleanup]').forEach(el=>{const t=task(el.dataset.cleanup);if(t?.cleanup_at)el.textContent=cleanupLabel(t);});document.querySelectorAll('[data-timer]').forEach(el=>{const t=task(el.dataset.timer);if(t)el.textContent=`${t.status==='now'?'◷ ':''}${duration(elapsed(t))}`;});},1000);
 let disconnected = false;
+pollLimits();
 async function poll(){try{await refresh();}catch(e){if(!disconnected)toast('Server disconnected');disconnected=true;}setTimeout(poll,1200);}poll();

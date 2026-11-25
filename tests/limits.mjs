@@ -1,0 +1,24 @@
+import { readFile } from 'node:fs/promises';
+import { runInNewContext } from 'node:vm';
+import assert from 'node:assert/strict';
+
+const source = await readFile('web/app.js', 'utf8');
+const el = { classList: { toggle(name, enabled) { el[name] = enabled; } } };
+const context = { $: () => el };
+runInNewContext(source.slice(source.indexOf('function renderWeeklyLimit('), source.indexOf('async function pollLimits(')), context);
+const week = { usedPercent: 93, windowDurationMins: 10080, resetsAt: 1900500000 };
+context.renderWeeklyLimit({rateLimits: {primary: week}});
+assert.equal(el.textContent, 'Codex weekly: 7% left');
+assert.equal(el.low, true);
+assert.match(el.title, /Resets/);
+context.renderWeeklyLimit({rateLimits: {secondary: week}, rateLimitsByLimitId: {codex: {secondary: {...week, usedPercent: 37}}}});
+assert.equal(el.textContent, 'Codex weekly: 63% left');
+assert.equal(el.low, false);
+context.renderWeeklyLimit({rateLimits: {primary: {...week, windowDurationMins: 300}}});
+assert.equal(el.textContent, 'Codex weekly: unavailable');
+context.renderWeeklyLimit({error: 'Usage unavailable'});
+assert.equal(el.title, 'Usage unavailable');
+assert.equal(el.low, false);
+context.renderWeeklyLimit({rateLimits: {secondary: {...week, usedPercent: 110}}});
+assert.equal(el.textContent, 'Codex weekly: 0% left');
+console.log('Weekly limit display checks passed');

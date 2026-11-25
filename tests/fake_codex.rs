@@ -6,6 +6,8 @@ fn main() {
             let line = line.unwrap();
             if line.contains("\"initialize\"") {
                 println!(r#"{{"id":1,"result":{{}}}}"#);
+            } else if line.contains("account/rateLimits/read") {
+                println!(r#"{{"id":2,"result":{{"rateLimits":{{"primary":{{"usedPercent":15,"windowDurationMins":300,"resetsAt":1900000000}},"secondary":{{"usedPercent":37,"windowDurationMins":10080,"resetsAt":1900500000}}}}}}}}"#);
             } else if line.contains("thread/delete") {
                 if line.contains("fail-delete") {
                     println!(r#"{{"id":2,"error":{{"message":"Deletion failed"}}}}"#);

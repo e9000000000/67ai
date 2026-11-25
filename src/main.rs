@@ -479,6 +479,24 @@ async fn worker(app: App, mut shutdown: watch::Receiver<bool>) {
 }
 
 async fn delete_session(executable: &str, thread: &str) -> Result<(), String> {
+    codex_request(executable, "thread/delete", json!({"threadId":thread})).await.map(|_| ())
+}
+
+async fn rate_limits(State(app): State<App>) -> Json<Value> {
+    static CACHE: std::sync::OnceLock<Mutex<(String, u64, Value)>> = std::sync::OnceLock::new();
+    let executable = app.lock().await.data.settings.codex_path.clone();
+    let mut cache = CACHE.get_or_init(|| Mutex::new((String::new(), 0, Value::Null))).lock().await;
+    if cache.0 != executable || now().saturating_sub(cache.1) >= 60_000 {
+        let result = match codex_request(&executable, "account/rateLimits/read", Value::Null).await {
+            Ok(value) => value,
+            Err(_) => json!({"error":"Codex usage unavailable. Check your Codex login and executable in Settings."}),
+        };
+        *cache = (executable, now(), result);
+    }
+    Json(cache.2.clone())
+}
+
+async fn codex_request(executable: &str, method: &str, params: Value) -> Result<Value, String> {
     let mut command = Command::new(executable);
     command.args(["app-server", "--stdio"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true);
     #[cfg(windows)]
@@ -489,23 +507,24 @@ async fn delete_session(executable: &str, thread: &str) -> Result<(), String> {
     let result = tokio::time::timeout(std::time::Duration::from_secs(30), async {
         for request in [
             json!({"id":1,"method":"initialize","params":{"clientInfo":{"name":"taskdesk","version":"0.1.0"},"capabilities":null}}),
-            json!({"id":2,"method":"thread/delete","params":{"threadId":thread}}),
+            json!({"id":2,"method":method,"params":params}),
         ] {
             input.write_all(format!("{request}\n").as_bytes()).await.map_err(|e| e.to_string())?;
             loop {
-                let line = output.next_line().await.map_err(|e| e.to_string())?.ok_or("Codex closed before confirming session deletion")?;
+                let line = output.next_line().await.map_err(|e| e.to_string())?.ok_or("Codex closed before responding")?;
                 let value: Value = serde_json::from_str(&line).map_err(|e| e.to_string())?;
                 if value["id"] != request["id"] { continue; }
                 if let Some(error) = value.get("error") { return Err(error.to_string()); }
                 if value.get("result").is_none() { return Err("Invalid Codex response".into()); }
+                if request["id"] == 2 { return Ok(value["result"].clone()); }
                 break;
             }
             if request["id"] == 1 {
                 input.write_all(b"{\"method\":\"initialized\"}\n").await.map_err(|e| e.to_string())?;
             }
         }
-        Ok(())
-    }).await.unwrap_or_else(|_| Err("Codex session deletion timed out".into()));
+        Err("Missing Codex response".into())
+    }).await.unwrap_or_else(|_| Err("Codex request timed out".into()));
     let _ = child.kill().await;
     result
 }
@@ -576,6 +595,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/app.js", get(|| async { ([("content-type", "text/javascript")], include_str!("../web/app.js")) }))
         .route("/style.css", get(|| async { ([("content-type", "text/css")], include_str!("../web/style.css")) }))
         .route("/api/state", get(state)).route("/api/action", post(action)).route("/api/agents/{id}", get(agents))
+        .route("/api/rate-limits", get(rate_limits))
         .route("/api/attachments", post(upload).layer(axum::extract::DefaultBodyLimit::max(25 * 1024 * 1024)))
         .route("/api/attachments/{id}", get(attachment))
         .layer(axum::extract::DefaultBodyLimit::max(2 * 1024 * 1024))

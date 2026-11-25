@@ -28,6 +28,9 @@ async function start() {
 async function stop() { const done=new Promise(r=>server.once('exit',r));server.kill();await done; }
 try {
   await start();
+  const limits = await (await fetch(`${url}/api/rate-limits`)).json();
+  assert.equal(limits.rateLimits.secondary.usedPercent, 37);
+  assert.equal(limits.rateLimits.secondary.windowDurationMins, 10080);
   const page = await fetch(url);
   const imageSources = page.headers.get('content-security-policy').split(';').map(s=>s.trim().split(/\s+/)).find(s=>s[0]==='img-src');
   assert(imageSources.includes('blob:'), 'Local attachment previews need blob: image URLs');
