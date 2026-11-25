@@ -4,6 +4,10 @@ A local Rust server and compact dark Kanban board for Codex. No Node build, host
 
 ## Run on Windows
 
+Download `taskdesk.exe` from [GitHub Releases](https://github.com/e9000000000/67ai/releases), run it from a writable folder, and open http://127.0.0.1:3030. Install Codex CLI and log in first. The downloaded executable does not require Rust; its UI is embedded. Data is saved in the working directory's `data` folder unless `TASKDESK_DATA_DIR` is set.
+
+### Build from source
+
 Install Rust and Codex CLI, then run `codex login` if needed. From this folder:
 
 ```powershell
@@ -13,6 +17,10 @@ Install Rust and Codex CLI, then run `codex login` if needed. From this folder:
 Open http://127.0.0.1:3030. The launcher builds the release executable and starts it in the current terminal. Ctrl+C stops the server and its current run. For development, use `cargo run`. The HTML, CSS and JavaScript are embedded in the executable, so rebuild after editing them.
 
 After changes, run `.\restart.ps1` to stop this checkout's existing server, rebuild the release version, start it in the background, and open your default browser when it is ready. This interrupts any running task; interrupted tasks return to Future. The script respects `TASKDESK_PORT` and `TASKDESK_DATA_DIR`.
+
+## GitHub releases
+
+Windows development uses the `windows` branch. Push it with `git push -u origin windows` the first time, then `git push`. The Windows release workflow runs on every branch push containing the workflow (not tag pushes), tests the code, builds the Windows x64 executable, and creates a GitHub release with `taskdesk.exe` attached. Each run gets a unique `windows-<run number>-<attempt>` tag targeting the pushed commit. Failed tests or builds prevent release creation. It uses GitHub's built-in token; no extra secret is needed.
 
 ## Workflow
 
@@ -45,7 +53,7 @@ Environment overrides:
 | Variable | Default |
 | --- | --- |
 | `TASKDESK_PORT` | `3030` |
-| `TASKDESK_DATA_DIR` | This source folder's `data` directory |
+| `TASKDESK_DATA_DIR` | The working directory's `data` directory |
 | `TASKDESK_CODEX` | Detected native executable; used when creating initial settings |
 
 Run checks with `cargo test`, `node --check web/app.js`, and `cargo build; node tests/integration.mjs`. The integration suite uses an isolated data directory and a deterministic fake Codex executable; it does not call a model. This checkout pins the installed MSVC Rust toolchain on Windows.

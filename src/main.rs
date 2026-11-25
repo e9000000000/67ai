@@ -571,7 +571,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let port = std::env::var("TASKDESK_PORT").unwrap_or_else(|_| "3030".into()).parse::<u16>()?;
     // Bind before loading state: a second launch must not recover another server's running tasks.
     let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).await?;
-    let dir = std::env::var_os("TASKDESK_DATA_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("data"));
+    let dir = match std::env::var_os("TASKDESK_DATA_DIR") {
+        Some(dir) => PathBuf::from(dir),
+        None => std::env::current_dir()?.join("data"),
+    };
     std::fs::create_dir_all(&dir)?;
     let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join("taskdesk.lock"))?;
     lock.try_lock().map_err(|_| "This Taskdesk data directory is already open in another server")?;

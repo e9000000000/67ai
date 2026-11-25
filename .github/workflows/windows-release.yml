@@ -1,0 +1,29 @@
+name: Windows release
+
+on:
+  push:
+    branches: ['**']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: rustup toolchain install stable-x86_64-pc-windows-msvc --profile minimal
+      - name: Test
+        run: cargo test --locked
+      - name: Build Windows executable
+        run: cargo build --release --locked
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          $tag = "windows-$env:GITHUB_RUN_NUMBER-$env:GITHUB_RUN_ATTEMPT"
+          gh release create $tag target/release/taskdesk.exe --target $env:GITHUB_SHA --title "Taskdesk Windows $env:GITHUB_RUN_NUMBER.$env:GITHUB_RUN_ATTEMPT" --notes "Windows x64 build from commit $env:GITHUB_SHA. Download taskdesk.exe, run it from a writable folder, and open http://127.0.0.1:3030. Requires Codex CLI and an existing login; Rust is not required. Data is stored in the working directory's data folder."
