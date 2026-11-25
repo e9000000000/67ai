@@ -3,6 +3,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import assert from 'node:assert/strict';
 import { runInNewContext } from 'node:vm';
+import { pathToFileURL } from 'node:url';
 
 const source = await readFile('web/app.js','utf8');
 let markup, submit, saved;
@@ -157,6 +158,53 @@ try {
   assert.equal(d.tasks.find(t=>t.id===automatic).error,null);
   assert(d.tasks.find(t=>t.id===automatic).messages.some(m=>m.text.includes('Resolving merge conflicts automatically')));
   assert.equal(git(repo,'status','--porcelain'),'');
+  // Raw tasks run in the project folder, including folders without Git.
+  settings={...settings,paused:true};
+  await action({action:'settings',...settings});
+  const rawPath=path.join(root,'raw-project'); await mkdir(rawPath);
+  const rawProject=(await action({action:'add_project',name:'Raw project',path:rawPath})).id;
+  let raw;
+  if(process.env.PLAYWRIGHT_MODULE) {
+    const {chromium}=await import(pathToFileURL(path.resolve(process.env.PLAYWRIGHT_MODULE)).href);
+    const browser=await chromium.launch({channel:'msedge',headless:true,args:['--mute-audio']});
+    try {
+      const page=await browser.newPage({viewport:{width:1280,height:900}});
+      await page.goto(url);
+      await page.locator('header .app-menu > summary').click();
+      await page.getByRole('button',{name:'New task',exact:true}).click();
+      assert.deepEqual(await page.locator('[name="execution_mode"] option').allTextContents(),['parallel-worktree','parallel-raw']);
+      assert.equal(await page.locator('[name="execution_mode"]').inputValue(),'parallel-worktree');
+      const boxes=await Promise.all(['project_id','blocker_id','execution_mode'].map(name=>page.locator(`[name="${name}"]`).boundingBox()));
+      assert(boxes.every(box=>box&&Math.abs(box.y-boxes[0].y)<2));
+      await page.locator('[name="title"]').fill('Raw');
+      await page.locator('[name="text"]').fill('PARALLEL_TEST');
+      await page.locator('[name="project_id"]').selectOption(rawProject);
+      await page.locator('[name="execution_mode"]').selectOption('parallel-raw');
+      await page.screenshot({path:path.join(root,'raw-task.png')});
+      await page.getByRole('button',{name:'Easy',exact:true}).click();
+      await page.locator('#dialog').waitFor({state:'hidden'});
+      raw=(await state()).tasks.find(t=>t.title==='Raw').id;
+      await action({action:'settings',...settings,parallelism:false});
+      await page.reload();
+      await page.locator('header .app-menu > summary').click();
+      await page.getByRole('button',{name:'New task',exact:true}).click();
+      assert.equal(await page.locator('[name="execution_mode"]').count(),0);
+    } finally { await browser.close(); }
+  } else {
+    raw=(await action({action:'create_task',project_id:rawProject,title:'Raw',text:'PARALLEL_TEST',status:'todo',model:'',execution_mode:'parallel-raw'})).id;
+  }
+  await stop(); await start();
+  assert.equal((await state()).tasks.find(t=>t.id===raw).execution_mode,'parallel-raw');
+  await action({action:'settings',...settings,paused:false});
+  d=await until(d=>d.tasks.find(t=>t.id===raw).status==='done');
+  const rawTask=d.tasks.find(t=>t.id===raw);
+  assert.equal(rawTask.error,null); assert.equal(rawTask.worktree,null); assert.equal(rawTask.awaiting_merge,false);
+  const rawPrompt=await readFile(path.join(rawPath,'Raw.txt'),'utf8');
+  assert.doesNotMatch(rawPrompt,/Work only in this task's Git worktree/);
+  assert.equal(rawTask.execution_mode,'parallel-raw');
+  await action({action:'send_message',id:raw,text:'Follow up'});
+  await until(d=>d.tasks.find(t=>t.id===raw).status==='done');
+  assert.equal((await state()).tasks.find(t=>t.id===raw).worktree,null);
   // Dirty main is reported without running Codex or changing the user's files.
   await writeFile(path.join(repo,'base.txt'),'uncommitted\n');
   const dirty=await create('Dirty');
@@ -164,5 +212,5 @@ try {
   assert.match(d.tasks.find(t=>t.id===dirty).error,/Select a hard-task model/);
   assert.equal(d.tasks.find(t=>t.id===dirty).thread_id,null);
   assert.equal(await readFile(path.join(repo,'base.txt'),'utf8'),'uncommitted\n');
-  console.log('PASS: defaults, worker limit, isolated worktrees, sequential merges, orange pending state, restart, settings changes, conflicts, retry, dirty-main protection.');
+  console.log('PASS: defaults, worker limit, isolated worktrees, sequential merges, orange pending state, restart, settings changes, conflicts, retry, raw execution, persisted modes, follow-ups, dirty-main protection.');
 } finally { if(server?.exitCode===null) await stop(); }

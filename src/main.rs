@@ -72,6 +72,14 @@ async fn attachment(State(app): State<App>, Path(key): Path<String>) -> Result<i
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum Difficulty { Easy, Hard, Gen }
+#[derive(Clone, Default, Serialize, Deserialize)]
+enum ExecutionMode {
+    #[default]
+    #[serde(rename = "parallel-worktree")]
+    Worktree,
+    #[serde(rename = "parallel-raw")]
+    Raw,
+}
 #[derive(Clone, Serialize, Deserialize)]
 struct Task {
     id: String, project_id: String, title: String, model: String, status: String,
@@ -83,6 +91,7 @@ struct Task {
     #[serde(default)] difficulty: Option<Difficulty>,
     #[serde(default)] cleanup_at: Option<u64>,
     #[serde(default)] attention: Option<String>,
+    #[serde(default)] execution_mode: ExecutionMode,
     #[serde(default)] worktree: Option<String>,
     #[serde(default)] awaiting_merge: bool,
     #[serde(default)] merging: bool,
@@ -220,7 +229,7 @@ enum Action {
     ProjectSettings { id: String, auto_approve_easy: bool, auto_approve_hard: bool },
     AiApproveTask { id: String },
     SelectContent { id: String, brief: ContentDirection },
-    CreateTask { #[serde(default)] blocker_id: Option<String>, #[serde(default)] content_planning: bool, project_id: String, title: String, text: String, model: String, status: String, #[serde(default)] difficulty: Option<Difficulty>, #[serde(default)] attachments: Vec<String> },
+    CreateTask { #[serde(default)] execution_mode: ExecutionMode, #[serde(default)] blocker_id: Option<String>, #[serde(default)] content_planning: bool, project_id: String, title: String, text: String, model: String, status: String, #[serde(default)] difficulty: Option<Difficulty>, #[serde(default)] attachments: Vec<String> },
     SetBlocker { id: String, blocker_id: Option<String> },
     EditTask { id: String, title: String, model: String },
     MoveTask { id: String, status: String },
@@ -365,7 +374,7 @@ async fn action(State(app): State<App>, Json(action): Json<Action>) -> ApiResult
             let project = Project { id: id(), name: name.trim().into(), path, auto_approve_easy: false, auto_approve_hard: false };
             result = json!({"id": project.id}); d.projects.push(project);
         }
-        Action::CreateTask { blocker_id, content_planning, project_id, title, text, model, status, difficulty, attachments } => {
+        Action::CreateTask { execution_mode, blocker_id, content_planning, project_id, title, text, model, status, difficulty, attachments } => {
             let attachments = load_attachments(&store, attachments)?;
             if content_planning && !matches!(difficulty, Some(Difficulty::Gen)) { return Err(bad("Content planning requires Gen")); }
             let text = if content_planning && text.trim().is_empty() { "I don't know. Inspect the project and suggest content directions.".into() } else { text };
@@ -374,7 +383,7 @@ async fn action(State(app): State<App>, Json(action): Json<Action>) -> ApiResult
             if !d.projects.iter().any(|p| p.id == project_id) { return Err(bad("Project not found")); }
             let blocker_id = blocker_id.filter(|id| !id.is_empty());
             validate_blocker(&d, "", &project_id, blocker_id.as_deref())?;
-            let mut task = Task { blocker_id, id: id(), project_id, title: title.trim().into(), model, status, difficulty, messages: vec![], created_at: now(), queued_at: now(), elapsed_ms: 0, started_at: None, thread_id: None, error: None, sent_count: 0, cancel: false, cleanup_at: None, attention: None, worktree: None, awaiting_merge: false, merging: false, review_pending: false, review_attempted: false, content_planning, content_plan_id: None, content_revision: 0, implementation_completed: false };
+            let mut task = Task { execution_mode, blocker_id, id: id(), project_id, title: title.trim().into(), model, status, difficulty, messages: vec![], created_at: now(), queued_at: now(), elapsed_ms: 0, started_at: None, thread_id: None, error: None, sent_count: 0, cancel: false, cleanup_at: None, attention: None, worktree: None, awaiting_merge: false, merging: false, review_pending: false, review_attempted: false, content_planning, content_plan_id: None, content_revision: 0, implementation_completed: false };
             task.message("user", text.trim()); task.messages.last_mut().unwrap().attachments = attachments;
             result = json!({"id": task.id}); d.tasks.push(task);
         }
@@ -776,7 +785,7 @@ fn next_task(d: &Data) -> Option<usize> {
         && t.blocker_id.as_ref().is_none_or(|id| d.tasks.iter().any(|b| &b.id == id && b.completed()))
         && !d.tasks.iter().any(|other| other.project_id == t.project_id
             && (((other.merging || (other.awaiting_merge && !d.settings.parallelism)) && t.worktree.is_none())
-                || (other.status == "now" && (!d.settings.parallelism || other.worktree.is_none() || t.is_gen())))))
+                || (other.status == "now" && (!d.settings.parallelism || other.worktree.is_none() || t.is_gen() || matches!(t.execution_mode, ExecutionMode::Raw))))))
         .min_by_key(|(_, t)| t.queued_at).map(|(i, _)| i)
 }
 
@@ -824,7 +833,7 @@ async fn recover_main(app: &App, task: &Task, project: &Project, settings: &Sett
 }
 async fn prepare_worktree(app: &App, task: &mut Task, project: &mut Project, settings: &Settings, shutdown: &mut watch::Receiver<bool>) -> Result<(), String> {
     let _main_git = MAIN_GIT.lock().await;
-    if task.worktree.is_none() && settings.parallelism {
+    if task.worktree.is_none() && settings.parallelism && matches!(task.execution_mode, ExecutionMode::Worktree) {
         recover_main(app, task, project, settings, shutdown).await?;
         let dir = {
             let store = app.lock().await;
@@ -967,7 +976,7 @@ fn save_proposals(d: &mut Data, source: &Task, mut reply: GenReply) {
             skipped += 1;
             continue;
         }
-        let mut task = Task { blocker_id: None, id: id(), project_id: source.project_id.clone(), title: title.into(), model: d.settings.hard_model.clone(), status: "future".into(), difficulty: Some(Difficulty::Hard), messages: vec![], created_at: now(), queued_at: now(), elapsed_ms: 0, started_at: None, thread_id: None, error: None, sent_count: 0, cancel: false, cleanup_at: None, attention: None, worktree: None, awaiting_merge: false, merging: false, review_pending: false, review_attempted: false, content_planning: false, content_plan_id: None, content_revision: 0, implementation_completed: false };
+        let mut task = Task { execution_mode: ExecutionMode::Worktree, blocker_id: None, id: id(), project_id: source.project_id.clone(), title: title.into(), model: d.settings.hard_model.clone(), status: "future".into(), difficulty: Some(Difficulty::Hard), messages: vec![], created_at: now(), queued_at: now(), elapsed_ms: 0, started_at: None, thread_id: None, error: None, sent_count: 0, cancel: false, cleanup_at: None, attention: None, worktree: None, awaiting_merge: false, merging: false, review_pending: false, review_attempted: false, content_planning: false, content_plan_id: None, content_revision: 0, implementation_completed: false };
         task.content_plan_id = source.content_plan_id.clone();
         task.content_revision = source.content_revision;
         task.message("user", proposal.text.trim());
@@ -1590,7 +1599,7 @@ mod tests {
         let app = Arc::new(Mutex::new(Store { data, file: dir.join("67ai.json") }));
         let Json(uploaded) = upload(State(app.clone()), axum::extract::Query(Upload { name: "notes.txt".into(), media_type: "text/plain".into() }), axum::body::Bytes::from_static(b"file contents")).await.unwrap();
         let key = uploaded["id"].as_str().unwrap().to_string();
-        let Json(created) = action(State(app.clone()), Json(Action::CreateTask { blocker_id: None, content_planning: false, project_id: "p".into(), title: "Files".into(), text: "".into(), model: "".into(), status: "future".into(), difficulty: None, attachments: vec![key.clone()] })).await.unwrap();
+        let Json(created) = action(State(app.clone()), Json(Action::CreateTask { execution_mode: ExecutionMode::Worktree, blocker_id: None, content_planning: false, project_id: "p".into(), title: "Files".into(), text: "".into(), model: "".into(), status: "future".into(), difficulty: None, attachments: vec![key.clone()] })).await.unwrap();
         let task_id = created["id"].as_str().unwrap().to_string();
         let _ = action(State(app.clone()), Json(Action::SendMessage { id: task_id.clone(), text: "".into(), attachments: vec![key.clone()] })).await.unwrap();
         assert!(action(State(app.clone()), Json(Action::SendMessage { id: task_id.clone(), text: "".into(), attachments: vec![] })).await.is_err());
@@ -1606,7 +1615,7 @@ mod tests {
         assert!(old.attachments.is_empty());
     }
     fn task(status: &str, queued_at: u64) -> Task {
-        Task { blocker_id: None, id: id(), project_id: "p".into(), title: "Test".into(), model: "".into(), status: status.into(), difficulty: None, messages: vec![], created_at: 0, queued_at, elapsed_ms: 0, started_at: None, thread_id: None, error: None, sent_count: 0, cancel: false, cleanup_at: None, attention: None, worktree: None, awaiting_merge: false, merging: false, review_pending: false, review_attempted: false, content_planning: false, content_plan_id: None, content_revision: 0, implementation_completed: false }
+        Task { execution_mode: ExecutionMode::Worktree, blocker_id: None, id: id(), project_id: "p".into(), title: "Test".into(), model: "".into(), status: status.into(), difficulty: None, messages: vec![], created_at: 0, queued_at, elapsed_ms: 0, started_at: None, thread_id: None, error: None, sent_count: 0, cancel: false, cleanup_at: None, attention: None, worktree: None, awaiting_merge: false, merging: false, review_pending: false, review_attempted: false, content_planning: false, content_plan_id: None, content_revision: 0, implementation_completed: false }
     }
     #[test]
     fn queue_is_fifo_and_sequential_by_default() {
@@ -1644,6 +1653,23 @@ mod tests {
         assert_eq!(next_task(&d), Some(2));
         d.tasks[2].project_id = "p".into();
         assert_eq!(next_task(&d), None); // Drain merges before starting a direct main run.
+    }
+    #[test]
+    fn raw_tasks_wait_for_same_project_runs() {
+        let mut d = initial_data(); d.settings.parallelism = true;
+        let mut active = task("now", 0); active.worktree = Some("isolated".into());
+        let mut raw = task("todo", 1); raw.execution_mode = ExecutionMode::Raw;
+        d.tasks = vec![active, raw];
+        assert_eq!(next_task(&d), None);
+        d.tasks[0].project_id = "other".into();
+        assert_eq!(next_task(&d), Some(1));
+        d.tasks[0].project_id = "p".into(); d.tasks[0].status = "done".into(); d.tasks[0].merging = true;
+        assert_eq!(next_task(&d), None);
+        d.tasks[0].merging = false;
+        assert_eq!(next_task(&d), Some(1));
+        let mut legacy = serde_json::to_value(&d.tasks[0]).unwrap();
+        legacy.as_object_mut().unwrap().remove("execution_mode");
+        assert!(matches!(serde_json::from_value::<Task>(legacy).unwrap().execution_mode, ExecutionMode::Worktree));
     }
     #[test]
     fn captures_thread_messages_and_failures() {
