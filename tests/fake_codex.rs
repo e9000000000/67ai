@@ -141,6 +141,15 @@ fn main() {
         println!(r#"{{"type":"turn.failed","error":{{"message":"You've hit your usage limit"}}}}"#);
         std::process::exit(1);
     }
+    if prompt.contains("SHELL_TEST") {
+        println!(r#"{{"type":"item.started","item":{{"id":"shell-1","type":"command_execution","command":"echo <hello>","status":"in_progress"}}}}"#);
+        println!(r#"{{"type":"item.updated","item":{{"id":"shell-1","type":"command_execution","aggregated_output":"<live output>"}}}}"#);
+        std::io::stdout().flush().unwrap();
+        std::thread::sleep(Duration::from_secs(3));
+        if !prompt.contains("SHELL_WAIT") {
+            println!(r#"{{"type":"item.completed","item":{{"id":"shell-1","type":"command_execution","command":"echo <hello>","aggregated_output":"<hello> done","exit_code":0,"status":"completed"}}}}"#);
+        }
+    }
     if prompt.contains("WAIT_TEST") { std::thread::sleep(Duration::from_secs(60)); }
     std::thread::sleep(Duration::from_millis(700));
     if prompt.contains("FAIL_TEST") {

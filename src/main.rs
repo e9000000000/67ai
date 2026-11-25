@@ -65,11 +65,17 @@ async fn attachment(State(app): State<App>, Path(key): Path<String>) -> Result<i
 #[serde(rename_all = "lowercase")]
 enum Difficulty { Easy, Hard, Gen }
 #[derive(Clone, Serialize, Deserialize)]
+struct ShellCommand {
+    id: String, command: String, cwd: String, agent: String, status: String,
+    output: String, exit_code: Option<i64>, started_at: u64, finished_at: Option<u64>,
+}
+#[derive(Clone, Serialize, Deserialize)]
 struct Task {
     id: String, project_id: String, title: String, model: String, status: String,
     messages: Vec<Message>, created_at: u64, queued_at: u64, elapsed_ms: u64,
     started_at: Option<u64>, thread_id: Option<String>, error: Option<String>,
     sent_count: usize, cancel: bool,
+    #[serde(default)] shell_commands: Vec<ShellCommand>,
     #[serde(default)] difficulty: Option<Difficulty>,
     #[serde(default)] cleanup_at: Option<u64>,
     #[serde(default)] attention: Option<String>,
@@ -253,7 +259,7 @@ async fn action(State(app): State<App>, Json(action): Json<Action>) -> ApiResult
             nonempty(&title, "Title")?; if attachments.is_empty() { nonempty(&text, "Task instructions")?; } valid_status(&status)?;
             if status == "done" { return Err(bad("New tasks must start in future or todo")); }
             if !d.projects.iter().any(|p| p.id == project_id) { return Err(bad("Project not found")); }
-            let mut task = Task { id: id(), project_id, title: title.trim().into(), model, status, difficulty, messages: vec![], created_at: now(), queued_at: now(), elapsed_ms: 0, started_at: None, thread_id: None, error: None, sent_count: 0, cancel: false, cleanup_at: None, attention: None, worktree: None, awaiting_merge: false, merging: false, review_pending: false, review_attempted: false };
+            let mut task = Task { id: id(), project_id, title: title.trim().into(), model, status, difficulty, messages: vec![], shell_commands: vec![], created_at: now(), queued_at: now(), elapsed_ms: 0, started_at: None, thread_id: None, error: None, sent_count: 0, cancel: false, cleanup_at: None, attention: None, worktree: None, awaiting_merge: false, merging: false, review_pending: false, review_attempted: false };
             task.message("user", text.trim()); task.messages.last_mut().unwrap().attachments = attachments;
             result = json!({"id": task.id}); d.tasks.push(task);
         }
@@ -379,6 +385,34 @@ async fn update_task(app: &App, key: &str, f: impl FnOnce(&mut Task)) -> Result<
     store.commit(d)
 }
 
+fn shell_event(task: &mut Task, value: &Value, run: &str, cwd: &str, agent: &str) {
+    let phase = value["type"].as_str().unwrap_or("");
+    let item = &value["item"];
+    if !matches!(phase, "item.started" | "item.updated" | "item.completed") || item["type"] != "command_execution" { return; }
+    let key = format!("{run}:{}", item["id"].as_str().unwrap_or("command"));
+    let index = match task.shell_commands.iter().position(|c| c.id == key) {
+        Some(index) => index,
+        None => {
+            task.shell_commands.push(ShellCommand { id: key, command: String::new(), cwd: cwd.into(), agent: agent.into(),
+                status: "running".into(), output: String::new(), exit_code: None, started_at: now(), finished_at: None });
+            task.shell_commands.len() - 1
+        }
+    };
+    let command = &mut task.shell_commands[index];
+    if let Some(text) = item["command"].as_str() { command.command = text.into(); }
+    if let Some(text) = item["aggregated_output"].as_str() { command.output = text.chars().take(12000).collect(); }
+    command.exit_code = item["exit_code"].as_i64();
+    if phase == "item.completed" {
+        command.status = if item["status"] == "failed" || command.exit_code.is_some_and(|code| code != 0) { "failed" } else { "completed" }.into();
+        command.finished_at = Some(now());
+    }
+}
+fn interrupt_shell_commands(task: &mut Task) {
+    for command in &mut task.shell_commands {
+        if command.status == "running" { command.status = "interrupted".into(); command.finished_at = Some(now()); }
+    }
+}
+
 fn event(task: &mut Task, value: &Value) -> bool {
     match value["type"].as_str().unwrap_or("") {
         "thread.started" => { task.thread_id = value["thread_id"].as_str().map(String::from); }
@@ -502,6 +536,13 @@ async fn pause_for_limit(app: &App, executable: &str) -> Result<(), String> {
 }
 
 async fn run_codex(app: &App, task: &Task, project: &Project, settings: &Settings, shutdown: &mut watch::Receiver<bool>, recovery: bool) -> Result<RunResult, String> {
+    let run = id();
+    let result = run_codex_inner(app, task, project, settings, shutdown, recovery, &run).await;
+    update_task(app, &task.id, interrupt_shell_commands).await?;
+    result
+}
+
+async fn run_codex_inner(app: &App, task: &Task, project: &Project, settings: &Settings, shutdown: &mut watch::Receiver<bool>, recovery: bool, run: &str) -> Result<RunResult, String> {
     if *shutdown.borrow() || app.lock().await.data.tasks.iter().any(|t| t.id == task.id && t.cancel) { return Err("Run stopped.".into()); }
     if app.lock().await.data.codex_paused_until > now() { return Err(LIMIT_PAUSED.into()); }
     let mut recovery_state = task.clone();
@@ -579,6 +620,7 @@ async fn run_codex(app: &App, task: &Task, project: &Project, settings: &Setting
                         limited = true;
                     }
                     update_task(app, &task.id, |t| {
+                        shell_event(t, &value, run, &project.path, if recovery { "Merge recovery" } else if task.review_pending { "AI reviewer" } else { "Task agent" });
                         if task.review_pending {
                             if !review_event(&mut recovery_state, &value) { failed = true; }
                         } else if generating && value["type"] == "item.completed" && value["item"]["type"] == "agent_message" {
@@ -806,7 +848,7 @@ fn save_proposals(d: &mut Data, source: &Task, reply: GenReply) {
             skipped += 1;
             continue;
         }
-        let mut task = Task { id: id(), project_id: source.project_id.clone(), title: title.into(), model: d.settings.hard_model.clone(), status: "future".into(), difficulty: Some(Difficulty::Hard), messages: vec![], created_at: now(), queued_at: now(), elapsed_ms: 0, started_at: None, thread_id: None, error: None, sent_count: 0, cancel: false, cleanup_at: None, attention: None, worktree: None, awaiting_merge: false, merging: false, review_pending: false, review_attempted: false };
+        let mut task = Task { id: id(), project_id: source.project_id.clone(), title: title.into(), model: d.settings.hard_model.clone(), status: "future".into(), difficulty: Some(Difficulty::Hard), messages: vec![], shell_commands: vec![], created_at: now(), queued_at: now(), elapsed_ms: 0, started_at: None, thread_id: None, error: None, sent_count: 0, cancel: false, cleanup_at: None, attention: None, worktree: None, awaiting_merge: false, merging: false, review_pending: false, review_attempted: false };
         task.message("user", proposal.text.trim());
         task.message("system", format!("Generated by Gen task: {} ({})", source.title, source.id));
         created.push(format!("- {} ({})", task.title, task.id));
@@ -1020,6 +1062,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _legacy_lock = legacy_lock;
     let mut data: Data = if file.exists() { serde_json::from_slice(&std::fs::read(&file)?)? } else { initial_data() };
     for t in &mut data.tasks {
+        interrupt_shell_commands(t);
         t.merging = false;
         if t.status == "now" {
             t.elapsed_ms += data.saved_at.saturating_sub(t.started_at.unwrap_or(data.saved_at));
@@ -1276,7 +1319,7 @@ mod tests {
         assert!(old.attachments.is_empty());
     }
     fn task(status: &str, queued_at: u64) -> Task {
-        Task { id: id(), project_id: "p".into(), title: "Test".into(), model: "".into(), status: status.into(), difficulty: None, messages: vec![], created_at: 0, queued_at, elapsed_ms: 0, started_at: None, thread_id: None, error: None, sent_count: 0, cancel: false, cleanup_at: None, attention: None, worktree: None, awaiting_merge: false, merging: false, review_pending: false, review_attempted: false }
+        Task { id: id(), project_id: "p".into(), title: "Test".into(), model: "".into(), status: status.into(), difficulty: None, messages: vec![], shell_commands: vec![], created_at: 0, queued_at, elapsed_ms: 0, started_at: None, thread_id: None, error: None, sent_count: 0, cancel: false, cleanup_at: None, attention: None, worktree: None, awaiting_merge: false, merging: false, review_pending: false, review_attempted: false }
     }
     #[test]
     fn queue_is_fifo_and_sequential_by_default() {
@@ -1314,6 +1357,29 @@ mod tests {
         assert_eq!(next_task(&d), Some(2));
         d.tasks[2].project_id = "p".into();
         assert_eq!(next_task(&d), None); // Drain merges before starting a direct main run.
+    }
+    #[test]
+    fn tracks_shell_lifecycle_and_separates_runs() {
+        let mut t = task("now", 0);
+        let started = json!({"type":"item.started", "item":{"id":"cmd", "type":"command_execution", "command":"echo hello", "status":"in_progress"}});
+        shell_event(&mut t, &started, "run1", "project", "Task agent");
+        assert_eq!(t.shell_commands[0].status, "running");
+        shell_event(&mut t, &json!({"type":"item.updated", "item":{"id":"cmd", "type":"command_execution", "aggregated_output":"hello"}}), "run1", "project", "Task agent");
+        assert_eq!(t.shell_commands[0].output, "hello");
+        shell_event(&mut t, &json!({"type":"item.completed", "item":{"id":"cmd", "type":"command_execution", "exit_code":1, "status":"completed"}}), "run1", "project", "Task agent");
+        assert_eq!(t.shell_commands.len(), 1);
+        assert_eq!(t.shell_commands[0].command, "echo hello");
+        assert_eq!(t.shell_commands[0].status, "failed");
+        assert!(t.shell_commands[0].finished_at.is_some());
+        shell_event(&mut t, &started, "run2", "other", "AI reviewer");
+        interrupt_shell_commands(&mut t);
+        assert_eq!(t.shell_commands.len(), 2);
+        assert_eq!(t.shell_commands[0].status, "failed");
+        assert_eq!(t.shell_commands[1].status, "interrupted");
+        assert_eq!(t.shell_commands[1].agent, "AI reviewer");
+        let mut old = serde_json::to_value(&t).unwrap();
+        old.as_object_mut().unwrap().remove("shell_commands");
+        assert!(serde_json::from_value::<Task>(old).unwrap().shell_commands.is_empty());
     }
     #[test]
     fn captures_thread_messages_and_failures() {

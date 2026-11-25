@@ -235,3 +235,14 @@ dialog.fullscreen .dialog-body { flex: 1; min-height: 0; max-height: none; displ
 .task-card.awaiting-merge:hover { background: #46301a; border-color: #f5a34b; }
 .merge-status { color: #f5a34b; padding: 12px 0; }
 input[type="checkbox"] { width: auto; accent-color: var(--accent); }
+
+.shell-inspection { width: 100%; min-width: 0; }
+.shell-inspection > .help { margin: 0 0 16px; }
+.shell-command { border: 1px solid var(--border); margin-bottom: 10px; }
+.shell-command summary { cursor: pointer; padding: 12px; overflow-wrap: anywhere; }
+.shell-command summary code { white-space: pre-wrap; }
+.shell-status { display: inline-block; margin-right: 10px; color: var(--muted); font-size: .8rem; }
+.shell-status.running { color: #85c5ff; }
+.shell-status.failed, .shell-status.interrupted { color: #ffac83; }
+.shell-meta { padding: 0 12px; color: var(--muted); font-size: .8rem; overflow-wrap: anywhere; }
+.shell-command pre { margin: 12px; padding: 12px; background: var(--bg); white-space: pre-wrap; overflow-wrap: anywhere; font-size: .8rem; }
