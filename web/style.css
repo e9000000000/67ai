@@ -171,17 +171,61 @@ dialog.fullscreen .dialog-body { flex: 1; min-height: 0; max-height: none; displ
 .attachment-chip .icon-button { flex-shrink: 0; }
 .attachment-hint { font-size: .75rem; color: var(--muted); margin-left: 10px; }
 .file-dragover { outline: 2px dashed var(--text); outline-offset: 3px; }
-@media (max-width: 600px) {
-  .board { grid-template-columns: repeat(4, minmax(210px, 1fr)); }
-  .weekly-limit { padding: 0 8px; font-size: .75rem; }
-  .project-tabs { flex: 1; }
-  .project-tab { min-width: 110px; padding-inline: 12px; }
-  .row { flex-direction: column; gap: 0; }
+.mobile-task-state { display: none; }
+@media (max-width: 768px), (max-width: 1024px) and (pointer: coarse) {
+  main, .task-panel, dialog.fullscreen { padding-left: env(safe-area-inset-left); padding-right: env(safe-area-inset-right); }
+  .topbar { flex-wrap: wrap; padding-top: env(safe-area-inset-top); }
+  .app-menu summary, .add-project { width: 44px; height: 44px; }
+  .project-tabs { flex: 1; width: 0; }
+  .project-tab { min-width: 100px; max-width: 200px; padding: 12px; }
+  .weekly-limit { flex-basis: 100%; margin: 0; padding: 6px 12px; white-space: normal; overflow-wrap: anywhere; font-size: .75rem; border-top: 1px solid var(--border); }
+  .board { display: block; overflow-y: auto; padding-bottom: env(safe-area-inset-bottom); }
+  .column { overflow: visible; }
+  .column + .column { border-left: 0; border-top: 1px solid var(--border); }
+  .column-head { min-height: 48px; position: sticky; top: 0; z-index: 1; background: var(--bg); }
+  .column-tasks { overflow: visible; padding: 8px; }
+  .task-card { padding: 12px; }
+  .card-meta { flex-wrap: wrap; }
+  .card-meta > span { min-width: 0; overflow-wrap: anywhere; }
+  .icon-button { width: 44px; height: 44px; }
+  .button, .button.small, .menu-items button { min-height: 44px; }
+  input, textarea, select, .task-menu select, .template-toolbar select, .code-editor { font-size: 1rem; }
+  .task-panel { width: 100%; border: 0; padding-top: env(safe-area-inset-top); overflow-y: auto; }
+  .panel-header { position: relative; flex-wrap: wrap; padding: 4px 8px; gap: 4px; }
+  .panel-header h2 { flex-basis: calc(100% - 52px); order: -2; }
+  #close-task { order: -1; }
+  .task-menu { position: static; }
+  .task-menu .menu-items { left: 8px; right: 8px; width: auto; max-height: calc(100dvh - 110px); overflow-y: auto; }
+  .mobile-task-state { display: block; }
+  .messages { min-height: 100px; }
   .messages, .composer { padding: 12px; }
-  dialog.fullscreen .dialog-body { padding: 12px; }
+  .composer { flex-shrink: 0; padding-bottom: max(12px, env(safe-area-inset-bottom)); }
+  .composer textarea { min-height: 64px; max-height: 20dvh; }
+  .composer > button[type=submit] { width: 100%; }
+  .attachment-hint { display: block; margin: 6px 0 0; }
+  .attachment-list { max-height: 120px; }
+  .attachment-chip { max-width: 100%; }
+  dialog, dialog.wide { width: calc(100% - 16px); max-width: none; max-height: calc(100dvh - 16px); }
+  .dialog-head { padding: 4px 12px; gap: 8px; }
+  .dialog-head h2 { min-width: 0; overflow-wrap: anywhere; }
+  .dialog-body { padding: 12px; max-height: calc(100dvh - 80px); }
+  .dialog-actions { flex-wrap: wrap; }
+  .dialog-actions .button { white-space: normal; }
+  .row { flex-direction: column; gap: 0; }
+  dialog.fullscreen { padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); }
+  dialog.fullscreen .dialog-body { padding: 12px; display: block; }
+  .new-task-form { min-height: 100%; }
+  .new-task-form .instructions-field { min-height: 180px; }
   .new-task-footer { flex-wrap: wrap; gap: 12px; }
-  .new-task-footer .field { flex-basis: calc(50% - 6px); }
-  .new-task-footer .button { width: 100%; }
+  .new-task-footer .field { flex-basis: 100%; }
+  .new-task-footer .button { flex: 1; }
+  @media (max-height: 500px) {
+    .composer { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
+    .composer textarea { grid-column: 1 / -1; min-height: 44px; }
+    .composer .attachment-editor { min-width: 0; padding-top: 0; }
+    .composer .attachment-hint { display: none; }
+    .composer > button[type=submit] { margin: 0; }
+  }
 }
 
 .approval-countdown { display: block; margin: 8px 0; color: #a6d7af; font-size: 12px; }
