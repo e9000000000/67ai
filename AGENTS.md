@@ -75,3 +75,6 @@ Portable instructions for agents working on a Unity project. Use the Unity versi
 
 # UI copy
 - Do not add explanatory descriptions or helper paragraphs to task creation. Keep controls compact; on desktop, keep the blocker selector on the same row as project selection.
+
+# testing
+- turn off sound for the program while testing it. never play sound for real (i don't want to hear it)
