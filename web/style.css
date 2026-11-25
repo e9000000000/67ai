@@ -235,3 +235,10 @@ dialog.fullscreen .dialog-body { flex: 1; min-height: 0; max-height: none; displ
 .task-card.awaiting-merge:hover { background: #46301a; border-color: #f5a34b; }
 .merge-status { color: #f5a34b; padding: 12px 0; }
 input[type="checkbox"] { width: auto; accent-color: var(--accent); }
+.content-plan-list { display: grid; gap: 10px; margin-top: 18px; }
+.content-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0; }
+.content-brief dt { font-weight: 600; margin-top: 12px; }
+.content-brief dd { margin: 4px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.sample-report { white-space: pre-wrap; overflow-wrap: anywhere; padding: 14px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; }
+#content-plan details { margin: 16px 0; }
+#sample-history { overflow-wrap: anywhere; }

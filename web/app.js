@@ -36,7 +36,7 @@ async function refresh() {
   const result = await res.json(); data = result.data; models = result.models; serverOffset = result.server_time-Date.now();
   disconnected = false;
   document.title = data.tasks.some(needsAttention) ? 'QUESTION' : `67ai-${data.tasks.filter(t => t.status === 'todo').length}-${data.tasks.filter(t => t.status === 'now').length}`;
-  renderBoard(); if (selectedTask) refreshPanel();
+  renderBoard(); if (selectedTask) refreshPanel(); refreshContentPlan();
 }
 function modelOptions(value = '', withConfig = true) {
   const all = [...new Set([...models, data.settings.hard_model, data.settings.easy_model, data.settings.gen_model, value].filter(Boolean))];
@@ -57,8 +57,16 @@ function difficultyBadge(t) {
   const difficulty = t.difficulty || (easy_model !== hard_model ? t.model === easy_model ? 'easy' : t.model === hard_model ? 'hard' : '' : '');
   return ['easy', 'hard', 'gen'].includes(difficulty) ? `<span class="task-difficulty ${difficulty}">${{easy:'Easy',hard:'Hard',gen:'Gen'}[difficulty]}</span>` : '';
 }
+function contentHold(t) {
+  if (!t.content_plan_id) return '';
+  const p=data.content_plans.find(p=>p.id===t.content_plan_id);
+  if (!p || p.sample_id===t.id) return '';
+  if(p.revision!==t.content_revision)return 'Earlier sample revision — create fresh batch research';
+  return p.decision!=='accepted'||!p.sample_ready?'Waiting for a ready, accepted sample':'';
+}
+
 function card(t) {
-  return `<button class="task-card ${t.status==='now'?'running':''} ${needsAttention(t)?'needs-attention':''} ${t.awaiting_merge?'awaiting-merge':''}" data-task="${t.id}" draggable="${t.status!=='now'&&!t.awaiting_merge}"><h3>${escape(t.title)}</h3>${t.cleanup_at ? `<span class="approval-countdown" data-cleanup="${t.id}">${cleanupLabel(t)}</span>` : ''}<span class="card-meta">${difficultyBadge(t)}${!projectId ? '<span>'+escape(project(t.project_id)?.name)+'</span>' : ''}${t.review_pending ? '<span>AI review '+(t.status==='now'?'running':t.error?'interrupted':'queued')+'</span>' : ''}${t.awaiting_merge ? `<span>${t.merging?'Merging into main':t.error?'Merge needs attention':'Waiting to merge'}</span>` : ''}${needsAttention(t) ? `<span class="card-error">${escape(attentionLabel(t))}</span>` : ''}<span data-timer="${t.id}">${duration(elapsed(t))}</span></span></button>`;
+  return `<button class="task-card ${t.status==='now'?'running':''} ${needsAttention(t)?'needs-attention':''} ${t.awaiting_merge?'awaiting-merge':''}" data-task="${t.id}" draggable="${t.status!=='now'&&!t.awaiting_merge}"><h3>${escape(t.title)}</h3>${t.cleanup_at ? `<span class="approval-countdown" data-cleanup="${t.id}">${cleanupLabel(t)}</span>` : ''}<span class="card-meta">${difficultyBadge(t)}${contentHold(t)?`<span>${escape(contentHold(t))}</span>`:''}${!projectId ? '<span>'+escape(project(t.project_id)?.name)+'</span>' : ''}${t.review_pending ? '<span>AI review '+(t.status==='now'?'running':t.error?'interrupted':'queued')+'</span>' : ''}${t.awaiting_merge ? `<span>${t.merging?'Merging into main':t.error?'Merge needs attention':'Waiting to merge'}</span>` : ''}${needsAttention(t) ? `<span class="card-error">${escape(attentionLabel(t))}</span>` : ''}<span data-timer="${t.id}">${duration(elapsed(t))}</span></span></button>`;
 }
 function modal(title, body, wide = false, fullscreen = false) {
   const dialog = $('#dialog'); dialog.classList.toggle('wide', wide); dialog.classList.toggle('fullscreen', fullscreen);
@@ -126,9 +134,9 @@ function addProject() {
   formSubmit(async f => { const result = await api({action:'add_project',name:f.get('name'),path:f.get('path')}); projectId=result.id;renderBoard();toast('Project added'); });
 }
 function genTask(kind) {
+  if (kind === 'content') return contentPlans();
   const presets = {
     issues: ['Find issues', 'Thoroughly investigate this project for bugs, broken behavior, and other concrete problems. Create one Future task for each distinct issue with evidence, reproduction details where possible, relevant files, and acceptance criteria. Do not fix anything.'],
-    content: ['Gen more content', 'Investigate what content can extend this project using its existing systems and mechanics, such as more levels or continuation of its existing story. Create actionable Future tasks grounded in current content, formats, and assets. Do not propose new features or changes to how the project works. Do not generate production content or implement anything.'],
     features: ['Gen new features', 'Investigate this project and propose useful new features that fit its purpose and current design. Create a separate actionable Future task for each distinct feature with rationale, scope, relevant systems, and acceptance criteria. Do not implement anything.']
   };
   newTask('todo', presets[kind]);
@@ -146,6 +154,10 @@ function openTask(key) {
   $('#overlay').hidden=false; $('#task-panel').hidden=false;
   $('main').inert=true;
   $('#task-panel').innerHTML=`<div class="panel-header"><h2 id="panel-title"></h2><span id="panel-difficulty"></span><details class="app-menu task-menu"><summary aria-label="Task menu" title="Task menu"><span class="burger"></span></summary><div class="menu-items"><label class="field mobile-task-state"><span>Move to</span><select id="task-state" aria-label="Task state">${states.map(status=>`<option value="${status}" ${status==='now'?'disabled':''}>${status[0].toUpperCase()+status.slice(1)}</option>`).join('')}</select></label><label class="field"><span>Model</span><select id="task-model" aria-label="Task model">${modelOptions(t.model)}</select></label><button id="task-agents">AGENTS.md</button><button id="edit-task">Edit title</button><button id="delete-task">Delete task</button><button id="stop-task" hidden>Stop</button></div></details><button id="approve-task" class="button primary small" title="Approve and clean up this task and its Codex session in 30 minutes. Project files stay." hidden>Approve</button><button id="ai-approve-task" class="button small" title="Review this result with the Hard model" hidden>AI approve</button><button id="revive-task" class="button small" title="Cancel cleanup" hidden>Revive</button><button id="close-task" class="icon-button" aria-label="Close task">×</button></div><div class="messages" id="messages"></div><form class="composer" id="message-form"><textarea id="message-input" placeholder="Add details or ask Codex to continue…" aria-label="Message to Codex" required></textarea></form>`;
+  if (t.content_plan_id) {
+    $('#messages').insertAdjacentHTML('beforebegin', '<button id="task-content-plan" class="button small">Content plan &amp; sample feedback</button>');
+    $('#task-content-plan').onclick=()=>{closeTask();openContentPlan(t.content_plan_id);};
+  }
   $('#close-task').onclick=closeTask;
   $('#task-model').onchange=async e=>{await act({action:'edit_task',id:key,title:task(key).title,model:e.target.value});refreshPanel();};
   $('#task-state').onchange=async e=>{e.target.closest('details').open=false;await act({action:'move_task',id:key,status:e.target.value});refreshPanel();};
@@ -192,10 +204,10 @@ function refreshPanel() {
   $('#message-input').placeholder=needsAttention(t)?'Type your answer or instructions to continue…':'Add details or ask Codex to continue…';
   $('#panel-title').classList.toggle('card-error',needsAttention(t));
   $('#send-message').disabled=!!t.awaiting_merge;
-  const signature=JSON.stringify([t.messages,t.error,t.attention,t.status,t.awaiting_merge,t.merging]);if(signature===lastMessages)return;lastMessages=signature;
+  const signature=JSON.stringify([t.messages,t.error,t.attention,t.status,t.awaiting_merge,t.merging,contentHold(t)]);if(signature===lastMessages)return;lastMessages=signature;
   const messages=$('#messages');const atBottom=messages.scrollHeight-messages.scrollTop-messages.clientHeight<90||!messages.innerHTML;
   const opened=[...messages.querySelectorAll('details[open]')].map(el=>el.dataset.index);
-  messages.innerHTML=(t.awaiting_merge?`<div class="merge-status" role="status">${t.merging?'Merging into main?':'Completed. Waiting to merge into main.'}</div>`:'')+(needsAttention(t)&&!t.error?`<div class="run-error" role="status">${escape(attentionLabel(t))}. This task is unfinished. Reply below to continue.</div>`:'')+(t.error?`<div class="run-error">${escape(t.error)}${t.status!=='now'&&!t.merging?`<div><button id="retry-task" class="button small">${t.awaiting_merge?'Retry merge':'Retry in queue'}</button></div>`:''}</div>`:'')+t.messages.map((m,i)=>{
+  messages.innerHTML=(contentHold(t)?`<div class="merge-status">${escape(contentHold(t))}</div>`:'')+(t.awaiting_merge?`<div class="merge-status" role="status">${t.merging?'Merging into main?':'Completed. Waiting to merge into main.'}</div>`:'')+(needsAttention(t)&&!t.error?`<div class="run-error" role="status">${escape(attentionLabel(t))}. This task is unfinished. Reply below to continue.</div>`:'')+(t.error?`<div class="run-error">${escape(t.error)}${t.status!=='now'&&!t.merging?`<div><button id="retry-task" class="button small">${t.awaiting_merge?'Retry merge':'Retry in queue'}</button></div>`:''}</div>`:'')+t.messages.map((m,i)=>{
     if(m.role==='system')return `<div class="message system">${escape(m.text)}</div>`;
     if(m.role==='activity')return `<div class="message activity"><details data-index="${i}" ${opened.includes(String(i))?'open':''}><summary>${escape(m.text.split('\n')[0].slice(0,140))}</summary><pre>${escape(m.text)}</pre></details></div>`;
     return `<article class="message ${m.role}"><div class="message-label">${m.role==='reviewer'?'AI reviewer':m.role==='user'?'You':'◈ Codex'}<time>${new Date(m.at).toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit'})}</time></div>${messageBody(m)}<div class="attachment-list">${(m.attachments||[]).map(f=>`<a class="attachment-chip" href="/api/attachments/${encodeURIComponent(f.id)}" download="${escape(f.name)}">${attachmentMarkup(f, `/api/attachments/${encodeURIComponent(f.id)}`)}</a>`).join('')}</div></article>`;

@@ -87,7 +87,7 @@ assert.match(context.difficultyBadge({difficulty:'gen',model:'custom-model'}), /
 assert.equal(context.difficultyBadge({model:'gen-model'}), '');
 runInNewContext(source.slice(source.indexOf('function genTask('), source.indexOf('function openTask(')), context);
 context.$ = selector=>selector.startsWith('button') ? {value:'gen'} : form;
-for (const kind of ['issues','content','features']) {
+for (const kind of ['issues','features']) {
   context.genTask(kind);
   assert.match(markup, /Start Gen/);
   assert.doesNotMatch(markup, /value="hard"/);
@@ -96,6 +96,10 @@ for (const kind of ['issues','content','features']) {
   assert.equal(action.model, 'gen-model');
   assert.equal(action.status, 'todo');
 }
+let openedPlans=false;
+context.contentPlans=()=>{openedPlans=true;};
+context.genTask('content');
+assert.equal(openedPlans,true);
 context.projectId='';
 context.genTask('issues');
 assert.match(markup, /Select a project/);

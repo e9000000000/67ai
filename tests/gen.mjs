@@ -109,6 +109,14 @@ try {
       for(const label of ['Find issues','Gen more content','Gen new features']) {
         await page.locator('header .app-menu > summary').click();
         await page.getByRole('button',{name:label,exact:true}).click();
+        if(label==='Gen more content') {
+          await page.getByRole('button',{name:'New content brief',exact:true}).click();
+          assert.equal(await page.locator('[name="project_id"]').inputValue(),projectId);
+          await page.locator('[name="sample_scope"]').waitFor();
+          await page.screenshot({path:path.join(root,'gen-content.png')});
+          await page.getByRole('button',{name:'Close dialog'}).click();
+          continue;
+        }
         assert.equal(await page.locator('[name="project_id"]').inputValue(),projectId);
         assert.ok((await page.locator('#task-instructions').inputValue()).length>80);
         if(label==='Find issues') {

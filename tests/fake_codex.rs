@@ -49,7 +49,14 @@ fn main() {
         if title.contains("GEN_INVALID") {
             println!(r#"{{"type":"item.completed","item":{{"type":"agent_message","text":"Invalid Gen response"}}}}"#);
         } else {
-            let (outcome, tasks) = if title.contains("GEN_QUESTION") { ("question", "[]") }
+            let (outcome, tasks) = if title.starts_with("Task: Next content batch:") {
+                    assert!(prompt.contains("Creative decision: accepted"));
+                    assert!(prompt.contains("sample.txt"));
+                    assert!(prompt.contains("at most THREE"));
+                    assert!(prompt.contains("current project files"));
+                    assert!(prompt.contains("User feedback history"));
+                    ("completed", r#"[{\"title\":\"Content unit A\",\"text\":\"One encounter using sample.txt format; integrate encounters/a.txt; run loader check; try via encounter menu.\"},{\"title\":\"Content unit B\",\"text\":\"One encounter using sample.txt format; integrate encounters/b.txt; run loader check; try via encounter menu.\"},{\"title\":\"Content unit C\",\"text\":\"One encounter using sample.txt format; integrate encounters/c.txt; run loader check; try via encounter menu.\"},{\"title\":\"Over budget\",\"text\":\"Must not be saved.\"}]"#)
+                } else if title.contains("GEN_QUESTION") { ("question", "[]") }
                 else if title.contains("GEN_BLOCKED") { ("blocked", "[]") }
                 else if title.contains("GEN_REFUSED") { ("refused", "[]") }
                 else if title.contains("GEN_EMPTY") { ("completed", "[]") }
@@ -94,6 +101,26 @@ fn main() {
             println!(r#"{{"type":"item.completed","item":{{"type":"agent_message","text":"{{\"decision\":\"{decision}\",\"message\":\"Review verdict\"}}"}}}}"#);
             println!(r#"{{"type":"item.completed","item":{{"type":"agent_message","text":"Review finished."}}}}"#);
         }
+        println!(r#"{{"type":"turn.completed"}}"#);
+        return;
+    }
+    if prompt.starts_with("Task: Sample:") {
+        assert!(args.windows(2).any(|a| a == ["--model", "hard-review-model"]));
+        assert!(prompt.contains("exactly ONE playable sample"));
+        assert!(prompt.contains("Integration" ) || prompt.contains("integration"));
+        assert!(prompt.contains("Technical") || prompt.contains("technical"));
+        assert!(prompt.contains("Unity Editor/background/no-build rules"));
+        assert!(prompt.contains("Chosen brief"));
+        let dir = std::path::PathBuf::from(std::env::var("67AI_DATA_DIR").unwrap());
+        std::fs::write(dir.join("sample-prompt.txt"), &prompt).unwrap();
+        println!(r#"{{"type":"thread.started","thread_id":"sample-session"}}"#);
+        std::io::stdout().flush().unwrap();
+        std::thread::sleep(Duration::from_millis(800));
+        let title = prompt.lines().next().unwrap();
+        if title.contains("SAMPLE_FAIL") { std::process::exit(1); }
+        let outcome = if title.contains("SAMPLE_BLOCKED") && !prompt.contains("Revise the same single sample") { "blocked" } else { "completed" };
+        std::fs::write("sample.txt", "One playable encounter fixture").unwrap();
+        println!(r#"{{"type":"item.completed","item":{{"type":"agent_message","text":"{{\"outcome\":\"{outcome}\",\"message\":\"Sample integrated at sample.txt. Loader check passed. Try: open the encounter menu and choose Sample.\"}}"}}}}"#);
         println!(r#"{{"type":"turn.completed"}}"#);
         return;
     }

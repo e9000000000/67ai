@@ -3,6 +3,9 @@
 #[cfg(windows)]
 mod tray;
 
+mod content;
+use content::*;
+
 use axum::{Json, Router, extract::{Path, State}, http::{HeaderMap, StatusCode}, response::{Html, IntoResponse}, routing::{get, post}};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -78,6 +81,9 @@ struct Task {
     #[serde(default)] merging: bool,
     #[serde(default)] review_pending: bool,
     #[serde(default)] review_attempted: bool,
+    #[serde(default)] content_plan_id: Option<String>,
+    #[serde(default)] content_revision: u64,
+    #[serde(default)] implementation_completed: bool,
 }
 impl Task {
     fn message(&mut self, role: &str, text: impl Into<String>) { self.messages.push(Message { role: role.into(), text: text.into(), at: now(), attachments: vec![] }); }
@@ -103,10 +109,11 @@ fn default_workers() -> usize { 4 }
 #[derive(Clone, Serialize, Deserialize)]
 struct Settings { #[serde(default)] hard_model: String, #[serde(default)] easy_model: String, #[serde(default)] gen_model: String, codex_path: String, paused: bool, #[serde(default = "default_workers")] max_workers: usize, #[serde(default)] parallelism: bool }
 #[derive(Clone, Serialize, Deserialize)]
-struct Data { projects: Vec<Project>, tasks: Vec<Task>, templates: Vec<Template>, settings: Settings, saved_at: u64, #[serde(default)] codex_paused_until: u64 }
+struct Data { projects: Vec<Project>, tasks: Vec<Task>, templates: Vec<Template>, settings: Settings, saved_at: u64, #[serde(default)] codex_paused_until: u64, #[serde(default)] content_plans: Vec<ContentPlan> }
 struct Store { data: Data, file: PathBuf }
 impl Store {
     fn commit(&mut self, mut data: Data) -> Result<(), String> {
+        sync_content_plans(&mut data, &self.data);
         data.saved_at = now();
         let bytes = serde_json::to_vec_pretty(&data).map_err(|e| e.to_string())?;
         let temp = self.file.with_extension("tmp");
@@ -147,7 +154,7 @@ fn initial_data() -> Data {
         (key.trim() == "model").then(|| value.trim().trim_matches('"').to_string())
     }).unwrap_or_default();
     Data {
-        projects: vec![], tasks: vec![], saved_at: now(), codex_paused_until: 0,
+        projects: vec![], tasks: vec![], saved_at: now(), codex_paused_until: 0, content_plans: vec![],
         settings: Settings { hard_model: model.clone(), easy_model: model.clone(), gen_model: model, codex_path: detect_codex(), paused: false, max_workers: 4, parallelism: false },
         templates: vec![
             Template { id: id(), name: "Simple & direct".into(), content: "# Project instructions\n\nUse simple, straightforward code and existing tools. Match the existing style.\nAvoid speculative abstractions and unrelated changes.\nRun relevant checks and report what changed, what passed, and any remaining issues.\nWork sequentially. Do not spawn subagents or delegate work.\n".into() },
@@ -165,6 +172,10 @@ async fn state(State(app): State<App>) -> Json<Value> {
 #[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 enum Action {
+    SaveContentBrief { project_id: String, brief: ContentBrief },
+    MakeSample { id: String },
+    SampleDecision { id: String, decision: String, feedback: String },
+    ExpandContent { id: String },
     AddProject { name: String, path: String },
     ProjectSettings { id: String, auto_approve_easy: bool, auto_approve_hard: bool },
     AiApproveTask { id: String },
@@ -224,6 +235,7 @@ fn finish_review(t: &mut Task, snapshot: &Task, review: Task) {
         t.message("reviewer", format!("Approved: {}", message.text));
         t.cleanup_at = Some(now() + 30 * 60 * 1000);
     } else {
+        t.implementation_completed = false;
         t.message("reviewer", &message.text);
         t.cleanup_at = None; t.status = "todo".into(); t.queued_at = now();
     }
@@ -233,6 +245,10 @@ async fn action(State(app): State<App>, Json(action): Json<Action>) -> ApiResult
     let mut d = store.data.clone();
     let mut result = json!({"ok": true});
     match action {
+        Action::SaveContentBrief { project_id, brief } => { result = save_brief(&mut d, project_id, brief)?; }
+        Action::MakeSample { id } => { result = make_sample(&mut d, &id)?; }
+        Action::SampleDecision { id, decision, feedback } => { decide_sample(&mut d, &id, &decision, &feedback)?; }
+        Action::ExpandContent { id } => { result = expand_content(&mut d, &id)?; }
         Action::ProjectSettings { id, auto_approve_easy, auto_approve_hard } => {
             let p = d.projects.iter_mut().find(|p| p.id == id).ok_or_else(|| bad("Project not found"))?;
             p.auto_approve_easy = auto_approve_easy; p.auto_approve_hard = auto_approve_hard;
@@ -253,7 +269,7 @@ async fn action(State(app): State<App>, Json(action): Json<Action>) -> ApiResult
             nonempty(&title, "Title")?; if attachments.is_empty() { nonempty(&text, "Task instructions")?; } valid_status(&status)?;
             if status == "done" { return Err(bad("New tasks must start in future or todo")); }
             if !d.projects.iter().any(|p| p.id == project_id) { return Err(bad("Project not found")); }
-            let mut task = Task { id: id(), project_id, title: title.trim().into(), model, status, difficulty, messages: vec![], created_at: now(), queued_at: now(), elapsed_ms: 0, started_at: None, thread_id: None, error: None, sent_count: 0, cancel: false, cleanup_at: None, attention: None, worktree: None, awaiting_merge: false, merging: false, review_pending: false, review_attempted: false };
+            let mut task = Task { id: id(), project_id, title: title.trim().into(), model, status, difficulty, messages: vec![], created_at: now(), queued_at: now(), elapsed_ms: 0, started_at: None, thread_id: None, error: None, sent_count: 0, cancel: false, cleanup_at: None, attention: None, worktree: None, awaiting_merge: false, merging: false, review_pending: false, review_attempted: false, content_plan_id: None, content_revision: 0, implementation_completed: false };
             task.message("user", text.trim()); task.messages.last_mut().unwrap().attachments = attachments;
             result = json!({"id": task.id}); d.tasks.push(task);
         }
@@ -265,6 +281,7 @@ async fn action(State(app): State<App>, Json(action): Json<Action>) -> ApiResult
             valid_status(&status)?; let t = task_mut(&mut d, &id)?; idle(t)?;
             if t.awaiting_merge { return Err(bad("Merge this task before moving it")); }
             if status == "done" && t.worktree.is_some() { return Err(bad("Worktree tasks must complete and merge before being marked done")); }
+            if status != "done" { t.implementation_completed = false; }
             t.cleanup_at = None;
             if status != "todo" { t.review_pending = false; }
             if status == "todo" {
@@ -280,6 +297,7 @@ async fn action(State(app): State<App>, Json(action): Json<Action>) -> ApiResult
             if attachments.is_empty() { nonempty(&text, "Message")?; } let t = task_mut(&mut d, &id)?;
             if t.awaiting_merge { return Err(bad("Wait for this task to merge before sending a follow-up")); }
             if t.review_pending && t.status != "now" { t.review_pending = false; }
+            t.implementation_completed = false;
             t.message("user", text.trim());
             t.messages.last_mut().unwrap().attachments = attachments;
             t.cleanup_at = None;
@@ -512,6 +530,12 @@ async fn run_codex(app: &App, task: &Task, project: &Project, settings: &Setting
     let generating = task.is_gen() && !task.review_pending && !recovery;
     let schema = store.file.parent().unwrap().join(if task.review_pending { "review-schema.json" } else if generating { "gen-schema.json" } else { "response-schema.json" });
     let mut parts = vec![];
+    if !recovery {
+        if let Some(plan) = store.data.content_plans.iter().find(|p| Some(&p.id) == task.content_plan_id.as_ref()) {
+            parts.push(content_context(plan));
+            if task.is_gen() { parts.push(BATCH_INSTRUCTIONS.into()); }
+        }
+    }
     if task.is_gen() {
         let existing: Vec<_> = store.data.tasks.iter().filter(|t| t.project_id == task.project_id && t.id != task.id).map(|t| {
             json!({"id":t.id,"title":t.title,"status":t.status,"instructions":t.messages.iter().filter(|m| m.role == "user").map(|m| &m.text).collect::<Vec<_>>()})
@@ -633,7 +657,7 @@ async fn run_codex(app: &App, task: &Task, project: &Project, settings: &Setting
 fn next_task(d: &Data) -> Option<usize> {
     let limit = if d.settings.parallelism { d.settings.max_workers } else { 1 };
     if d.settings.paused || d.codex_paused_until > now() || d.tasks.iter().filter(|t| t.status == "now").count() >= limit { return None; }
-    d.tasks.iter().enumerate().filter(|(_, t)| t.status == "todo" && t.error.is_none()
+    d.tasks.iter().enumerate().filter(|(_, t)| t.status == "todo" && t.error.is_none() && content_task_allowed(d, t)
         && !d.tasks.iter().any(|other| other.project_id == t.project_id
             && (((other.merging || (other.awaiting_merge && !d.settings.parallelism)) && t.worktree.is_none())
                 || (other.status == "now" && (!d.settings.parallelism || other.worktree.is_none() || t.is_gen())))))
@@ -797,7 +821,18 @@ async fn merge_worker(app: App, mut shutdown: watch::Receiver<bool>) {
         }
     }
 }
-fn save_proposals(d: &mut Data, source: &Task, reply: GenReply) {
+fn save_proposals(d: &mut Data, source: &Task, mut reply: GenReply) {
+    if source.content_plan_id.is_some() && !content_task_allowed(d, source) {
+        reply.tasks.clear(); reply.outcome = "blocked".into();
+        reply.message = "Sample direction changed or is no longer ready. No Future tasks were created.".into();
+    }
+    if let Some(plan) = d.content_plans.iter().find(|p| Some(&p.id) == source.content_plan_id.as_ref()) {
+        let remaining = 3usize.saturating_sub(plan.batch_task_ids.len());
+        if reply.tasks.len() > remaining {
+            reply.tasks.truncate(remaining);
+            reply.message.push_str("\nProposals were capped: this batch is limited to three content units across all research follow-ups, including cleaned-up tasks.");
+        }
+    }
     let mut created = vec![];
     let mut skipped = 0;
     for proposal in reply.tasks {
@@ -806,9 +841,17 @@ fn save_proposals(d: &mut Data, source: &Task, reply: GenReply) {
             skipped += 1;
             continue;
         }
-        let mut task = Task { id: id(), project_id: source.project_id.clone(), title: title.into(), model: d.settings.hard_model.clone(), status: "future".into(), difficulty: Some(Difficulty::Hard), messages: vec![], created_at: now(), queued_at: now(), elapsed_ms: 0, started_at: None, thread_id: None, error: None, sent_count: 0, cancel: false, cleanup_at: None, attention: None, worktree: None, awaiting_merge: false, merging: false, review_pending: false, review_attempted: false };
+        let mut task = Task { id: id(), project_id: source.project_id.clone(), title: title.into(), model: d.settings.hard_model.clone(), status: "future".into(), difficulty: Some(Difficulty::Hard), messages: vec![], created_at: now(), queued_at: now(), elapsed_ms: 0, started_at: None, thread_id: None, error: None, sent_count: 0, cancel: false, cleanup_at: None, attention: None, worktree: None, awaiting_merge: false, merging: false, review_pending: false, review_attempted: false, content_plan_id: None, content_revision: 0, implementation_completed: false };
+        task.content_plan_id = source.content_plan_id.clone();
+        task.content_revision = source.content_revision;
         task.message("user", proposal.text.trim());
+        if let Some(plan) = d.content_plans.iter().find(|p| Some(&p.id) == source.content_plan_id.as_ref()) {
+            task.message("user", format!("{}\nImplement at most ONE content unit comparable to the accepted sample, only this item from the next batch (maximum three tasks). No further batches or new systems. Verify the proposed scope against the accepted sample and current project files before implementation; ask if it cannot be bounded.", content_context(plan)));
+        }
         task.message("system", format!("Generated by Gen task: {} ({})", source.title, source.id));
+        if let Some(plan) = d.content_plans.iter_mut().find(|p| Some(&p.id) == source.content_plan_id.as_ref()) {
+            plan.batch_task_ids.push(task.id.clone());
+        }
         created.push(format!("- {} ({})", task.title, task.id));
         d.tasks.push(task);
     }
@@ -829,7 +872,9 @@ async fn worker(app: App, mut shutdown: watch::Receiver<bool>) {
             let mut d = store.data.clone();
             queue_auto_reviews(&mut d);
             if let Some(index) = next_task(&d) {
-                let t = &mut d.tasks[index]; t.status = "now".into(); t.started_at = Some(now()); t.cancel = false;
+                let t = &mut d.tasks[index];
+                if !t.review_pending { t.implementation_completed = false; }
+                t.status = "now".into(); t.started_at = Some(now()); t.cancel = false;
                 t.attention = Some("unconfirmed".into());
                 t.message("system", if t.review_pending { "AI reviewer started checking with the Hard model." } else { "Codex started working." });
                 let task = t.clone();
@@ -872,6 +917,7 @@ async fn worker(app: App, mut shutdown: watch::Receiver<bool>) {
                             t.status = if pending { "todo" } else { "done" }.into();
                             t.queued_at = now(); t.error = None;
                             if pending { t.attention = None; }
+                            t.implementation_completed = !t.is_gen() && !pending && t.attention.is_none();
                             t.awaiting_merge = !t.is_gen() && !pending && t.attention.is_none() && t.worktree.is_some();
                             t.message("system", if pending { "Run ended. Your follow-up is queued." } else if t.attention.is_some() { "Task unfinished. Reply below to continue." } else { "Run completed." });
                         }
@@ -1040,6 +1086,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let router = Router::new()
         .route("/", get(|| async { Html(include_str!("../web/index.html")) }))
         .route("/app.js", get(|| async { ([("content-type", "text/javascript")], include_str!("../web/app.js")) }))
+        .route("/content.js", get(|| async { ([("content-type", "text/javascript")], include_str!("../web/content.js")) }))
         .route("/markdown.js", get(|| async { ([("content-type", "text/javascript")], include_str!("../web/markdown.js")) }))
         .route("/vendor/markdown-it.min.js", get(|| async { ([("content-type", "text/javascript")], include_str!("../web/vendor/markdown-it.min.js")) }))
         .route("/vendor/highlight.min.js", get(|| async { ([("content-type", "text/javascript")], include_str!("../web/vendor/highlight.min.js")) }))
@@ -1276,7 +1323,7 @@ mod tests {
         assert!(old.attachments.is_empty());
     }
     fn task(status: &str, queued_at: u64) -> Task {
-        Task { id: id(), project_id: "p".into(), title: "Test".into(), model: "".into(), status: status.into(), difficulty: None, messages: vec![], created_at: 0, queued_at, elapsed_ms: 0, started_at: None, thread_id: None, error: None, sent_count: 0, cancel: false, cleanup_at: None, attention: None, worktree: None, awaiting_merge: false, merging: false, review_pending: false, review_attempted: false }
+        Task { id: id(), project_id: "p".into(), title: "Test".into(), model: "".into(), status: status.into(), difficulty: None, messages: vec![], created_at: 0, queued_at, elapsed_ms: 0, started_at: None, thread_id: None, error: None, sent_count: 0, cancel: false, cleanup_at: None, attention: None, worktree: None, awaiting_merge: false, merging: false, review_pending: false, review_attempted: false, content_plan_id: None, content_revision: 0, implementation_completed: false }
     }
     #[test]
     fn queue_is_fifo_and_sequential_by_default() {
