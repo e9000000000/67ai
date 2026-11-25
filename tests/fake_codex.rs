@@ -23,6 +23,16 @@ fn main() {
     }
     let mut prompt = String::new();
     std::io::stdin().read_to_string(&mut prompt).unwrap();
+    if prompt.contains("PARALLEL_TEST") {
+        let title = prompt.lines().next().unwrap().strip_prefix("Task: ").unwrap();
+        std::fs::write(format!("{title}.txt"), &prompt).unwrap();
+        println!(r#"{{"type":"thread.started","thread_id":"parallel-test"}}"#);
+        std::io::stdout().flush().unwrap();
+        std::thread::sleep(Duration::from_millis(1600));
+        println!(r#"{{"type":"item.completed","item":{{"type":"agent_message","text":"{{\"outcome\":\"completed\",\"message\":\"Done\"}}"}}}}"#);
+        println!(r#"{{"type":"turn.completed"}}"#);
+        return;
+    }
     std::fs::write("last-prompt.txt", &prompt).unwrap();
     let args: Vec<String> = std::env::args().collect();
     assert!(args.iter().any(|a| a == "--dangerously-bypass-approvals-and-sandbox"));

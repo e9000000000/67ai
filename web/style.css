@@ -154,3 +154,8 @@ dialog.fullscreen .dialog-body { flex: 1; min-height: 0; max-height: none; displ
 }
 
 .approval-countdown { display: block; margin: 8px 0; color: #a6d7af; font-size: 12px; }
+
+.task-card.awaiting-merge { background: #342314; border-color: #c77b2c; border-left: 3px solid #f5a34b; }
+.task-card.awaiting-merge:hover { background: #46301a; border-color: #f5a34b; }
+.merge-status { color: #f5a34b; padding: 12px 0; }
+input[type="checkbox"] { width: auto; accent-color: var(--accent); }

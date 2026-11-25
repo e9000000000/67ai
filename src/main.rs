@@ -60,14 +60,18 @@ struct Task {
     sent_count: usize, cancel: bool,
     #[serde(default)] cleanup_at: Option<u64>,
     #[serde(default)] attention: Option<String>,
+    #[serde(default)] worktree: Option<String>,
+    #[serde(default)] awaiting_merge: bool,
+    #[serde(default)] merging: bool,
 }
 impl Task {
     fn message(&mut self, role: &str, text: impl Into<String>) { self.messages.push(Message { role: role.into(), text: text.into(), at: now(), attachments: vec![] }); }
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct Template { id: String, name: String, content: String }
+fn default_workers() -> usize { 4 }
 #[derive(Clone, Serialize, Deserialize)]
-struct Settings { default_model: String, #[serde(default)] hard_model: String, #[serde(default)] easy_model: String, codex_path: String, paused: bool }
+struct Settings { default_model: String, #[serde(default)] hard_model: String, #[serde(default)] easy_model: String, codex_path: String, paused: bool, #[serde(default = "default_workers")] max_workers: usize, #[serde(default)] parallelism: bool }
 #[derive(Clone, Serialize, Deserialize)]
 struct Data { projects: Vec<Project>, tasks: Vec<Task>, templates: Vec<Template>, settings: Settings, saved_at: u64 }
 struct Store { data: Data, file: PathBuf }
@@ -114,7 +118,7 @@ fn initial_data() -> Data {
     }).unwrap_or_default();
     Data {
         projects: vec![], tasks: vec![], saved_at: now(),
-        settings: Settings { hard_model: model.clone(), easy_model: model.clone(), default_model: model, codex_path: detect_codex(), paused: false },
+        settings: Settings { hard_model: model.clone(), easy_model: model.clone(), default_model: model, codex_path: detect_codex(), paused: false, max_workers: 4, parallelism: false },
         templates: vec![
             Template { id: id(), name: "Simple & direct".into(), content: "# Project instructions\n\nUse simple, straightforward code and existing tools. Match the existing style.\nAvoid speculative abstractions and unrelated changes.\nRun relevant checks and report what changed, what passed, and any remaining issues.\nWork sequentially. Do not spawn subagents or delegate work.\n".into() },
             Template { id: id(), name: "Careful maintenance".into(), content: "# Project instructions\n\nRead the surrounding code before editing. Keep changes focused on the task.\nPreserve public interfaces unless the task requires a change.\nAdd a regression test for bug fixes where practical. Run relevant existing tests.\nReport the cause, fix, and validation. Work alone, without subagents.\n".into() },
@@ -140,7 +144,8 @@ enum Action {
     DeleteTask { id: String },
     ApproveTask { id: String },
     ReviveTask { id: String },
-    Settings { default_model: String, #[serde(default)] hard_model: String, #[serde(default)] easy_model: String, codex_path: String, paused: bool },
+    RetryMerge { id: String },
+    Settings { default_model: String, #[serde(default)] hard_model: String, #[serde(default)] easy_model: String, codex_path: String, paused: bool, #[serde(default = "default_workers")] max_workers: usize, #[serde(default)] parallelism: bool },
     SaveTemplate { id: Option<String>, name: String, content: String },
     DeleteTemplate { id: String },
     SaveAgents { project_id: String, content: String, original: String },
@@ -152,7 +157,7 @@ fn task_mut<'a>(d: &'a mut Data, key: &str) -> Result<&'a mut Task, (StatusCode,
     d.tasks.iter_mut().find(|t| t.id == key).ok_or_else(|| bad("Task not found"))
 }
 fn idle(t: &Task) -> Result<(), (StatusCode, String)> {
-    if t.status == "now" { Err(bad("Stop the running task first")) } else { Ok(()) }
+    if t.merging { Err(bad("Wait for the merge to finish")) } else if t.status == "now" { Err(bad("Stop the running task first")) } else { Ok(()) }
 }
 fn valid_status(s: &str) -> Result<(), (StatusCode, String)> {
     if ["future", "todo", "done"].contains(&s) { Ok(()) } else { Err(bad("Now is controlled by the worker. Move a task to todo to run it.")) }
@@ -176,7 +181,7 @@ async fn action(State(app): State<App>, Json(action): Json<Action>) -> ApiResult
             nonempty(&title, "Title")?; if attachments.is_empty() { nonempty(&text, "Task instructions")?; } valid_status(&status)?;
             if status == "done" { return Err(bad("New tasks must start in future or todo")); }
             if !d.projects.iter().any(|p| p.id == project_id) { return Err(bad("Project not found")); }
-            let mut task = Task { id: id(), project_id, title: title.trim().into(), model, status, messages: vec![], created_at: now(), queued_at: now(), elapsed_ms: 0, started_at: None, thread_id: None, error: None, sent_count: 0, cancel: false, cleanup_at: None, attention: None };
+            let mut task = Task { id: id(), project_id, title: title.trim().into(), model, status, messages: vec![], created_at: now(), queued_at: now(), elapsed_ms: 0, started_at: None, thread_id: None, error: None, sent_count: 0, cancel: false, cleanup_at: None, attention: None, worktree: None, awaiting_merge: false, merging: false };
             task.message("user", text.trim()); task.messages.last_mut().unwrap().attachments = attachments;
             result = json!({"id": task.id}); d.tasks.push(task);
         }
@@ -186,6 +191,8 @@ async fn action(State(app): State<App>, Json(action): Json<Action>) -> ApiResult
         }
         Action::MoveTask { id, status } => {
             valid_status(&status)?; let t = task_mut(&mut d, &id)?; idle(t)?;
+            if t.awaiting_merge { return Err(bad("Merge this task before moving it")); }
+            if status == "done" && t.worktree.is_some() { return Err(bad("Worktree tasks must complete and merge before being marked done")); }
             t.cleanup_at = None;
             if status == "todo" {
                 if t.sent_count >= t.messages.len() || !t.messages[t.sent_count..].iter().any(|m| m.role == "user") {
@@ -198,6 +205,7 @@ async fn action(State(app): State<App>, Json(action): Json<Action>) -> ApiResult
         Action::SendMessage { id, text, attachments } => {
             let attachments = load_attachments(&store, attachments)?;
             if attachments.is_empty() { nonempty(&text, "Message")?; } let t = task_mut(&mut d, &id)?;
+            if t.awaiting_merge { return Err(bad("Wait for this task to merge before sending a follow-up")); }
             t.message("user", text.trim());
             t.messages.last_mut().unwrap().attachments = attachments;
             t.cleanup_at = None;
@@ -208,21 +216,28 @@ async fn action(State(app): State<App>, Json(action): Json<Action>) -> ApiResult
             let t = task_mut(&mut d, &id)?;
             if t.status != "now" { return Err(bad("Task is not running")); } t.cancel = true;
         }
-        Action::DeleteTask { id } => { idle(task_mut(&mut d, &id)?)?; d.tasks.retain(|t| t.id != id); }
+        Action::DeleteTask { id } => { let t = task_mut(&mut d, &id)?; idle(t)?; if t.awaiting_merge { return Err(bad("Merge this task before deleting it")); } d.tasks.retain(|t| t.id != id); }
         Action::ApproveTask { id } => {
             let t = task_mut(&mut d, &id)?;
             if t.status != "done" { return Err(bad("Only done tasks can be approved")); }
+            if t.awaiting_merge { return Err(bad("Merge this task before approving it")); }
             if t.attention.is_some() { return Err(bad("Answer or retry this unfinished task before approving it")); }
             if t.cleanup_at.is_none() { t.cleanup_at = Some(now() + 30 * 60 * 1000); }
+            t.error = None;
+        }
+        Action::RetryMerge { id } => {
+            let t = task_mut(&mut d, &id)?; idle(t)?;
+            if !t.awaiting_merge { return Err(bad("Task is not waiting to merge")); }
             t.error = None;
         }
         Action::ReviveTask { id } => {
             let t = task_mut(&mut d, &id)?; idle(t)?;
             t.cleanup_at = None; t.error = None;
         }
-        Action::Settings { default_model, hard_model, easy_model, codex_path, paused } => {
+        Action::Settings { default_model, hard_model, easy_model, codex_path, paused, max_workers, parallelism } => {
             nonempty(&codex_path, "Codex executable")?;
-            d.settings = Settings { default_model: default_model.trim().into(), hard_model: hard_model.trim().into(), easy_model: easy_model.trim().into(), codex_path: codex_path.trim().into(), paused };
+            if max_workers == 0 { return Err(bad("Worker count must be at least 1")); }
+            d.settings = Settings { default_model: default_model.trim().into(), hard_model: hard_model.trim().into(), easy_model: easy_model.trim().into(), codex_path: codex_path.trim().into(), paused, max_workers, parallelism };
         }
         Action::SaveTemplate { id: key, name, content } => {
             nonempty(&name, "Template name")?;
@@ -233,7 +248,7 @@ async fn action(State(app): State<App>, Json(action): Json<Action>) -> ApiResult
         }
         Action::DeleteTemplate { id } => { d.templates.retain(|t| t.id != id); }
         Action::SaveAgents { project_id, content, original } => {
-            if d.tasks.iter().any(|t| t.project_id == project_id && t.status == "now") { return Err(bad("Wait for this project's running task to finish before editing instructions")); }
+            if d.tasks.iter().any(|t| t.project_id == project_id && (t.status == "now" || t.merging)) { return Err(bad("Wait for this project's running task to finish before editing instructions")); }
             let p = d.projects.iter().find(|p| p.id == project_id).ok_or_else(|| bad("Project not found"))?;
             let file = PathBuf::from(&p.path).join("AGENTS.md");
             let current = read_optional(&file).map_err(bad)?;
@@ -370,7 +385,10 @@ async fn run_codex(app: &App, task: &Task, project: &Project, settings: &Setting
     }
     drop(store);
     let prompt = parts.join("\n\n");
-    let prompt = format!("Task: {}\n\n{}", task.title, prompt);
+    let mut prompt = format!("Task: {}\n\n{}", task.title, prompt);
+    if task.worktree.is_some() {
+        prompt.push_str("\n\nWork only in this task's Git worktree and on its existing taskdesk branch. Do not switch branches, merge into main, or modify other worktrees. Commit completed changes here; Taskdesk will merge them into main separately.");
+    }
     let mut command = Command::new(&settings.codex_path);
     command.arg("exec");
     if let Some(thread) = &task.thread_id { command.args(["resume", thread]); }
@@ -434,10 +452,107 @@ async fn run_codex(app: &App, task: &Task, project: &Project, settings: &Setting
 }
 
 fn next_task(d: &Data) -> Option<usize> {
-    if d.settings.paused { return None; }
+    let limit = if d.settings.parallelism { d.settings.max_workers } else { 1 };
+    if d.settings.paused || d.tasks.iter().filter(|t| t.status == "now").count() >= limit { return None; }
     d.tasks.iter().enumerate().filter(|(_, t)| t.status == "todo" && t.error.is_none()
-        && !d.tasks.iter().any(|other| other.project_id == t.project_id && other.status == "now"))
+        && !d.tasks.iter().any(|other| other.project_id == t.project_id
+            && (((other.merging || (other.awaiting_merge && !d.settings.parallelism)) && t.worktree.is_none())
+                || (other.status == "now" && (!d.settings.parallelism || other.worktree.is_none())))))
         .min_by_key(|(_, t)| t.queued_at).map(|(i, _)| i)
+}
+
+async fn git(path: &str, args: &[&str]) -> Result<String, String> {
+    let mut command = Command::new("git");
+    command.current_dir(path).args(args).kill_on_drop(true);
+    #[cfg(windows)]
+    command.creation_flags(0x08000000);
+    let output = command.output().await.map_err(|e| e.to_string())?;
+    if !output.status.success() { return Err(format!("git {}: {}{}", args[0], String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr))); }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+async fn require_main(project: &Project) -> Result<(), String> {
+    if !git(&project.path, &["rev-parse", "--show-prefix"]).await?.is_empty() {
+        return Err("Parallel tasks require the project folder to be the Git repository root.".into());
+    }
+    if git(&project.path, &["branch", "--show-current"]).await? != "main" {
+        return Err("Parallel tasks require the project's main branch to be checked out.".into());
+    }
+    if !git(&project.path, &["status", "--porcelain"]).await?.is_empty() {
+        return Err("Commit or stash changes in the main worktree before starting or merging parallel tasks.".into());
+    }
+    Ok(())
+}
+async fn prepare_worktree(app: &App, task: &mut Task, project: &mut Project, settings: &Settings) -> Result<(), String> {
+    if task.worktree.is_none() && settings.parallelism {
+        require_main(project).await?;
+        let dir = {
+            let store = app.lock().await;
+            store.file.parent().unwrap().join("worktrees")
+        };
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let dir = std::fs::canonicalize(dir).map_err(|e| e.to_string())?;
+        let path = dir.join(&task.id).to_string_lossy().trim_start_matches(r"\\?\").to_string();
+        // Persist the location first so interrupted setup can be retried safely.
+        update_task(app, &task.id, |t| { t.worktree = Some(path.clone()); t.thread_id = None; t.sent_count = 0; }).await?;
+        task.worktree = Some(path); task.thread_id = None; task.sent_count = 0;
+    }
+    if let Some(path) = &task.worktree {
+        let branch = format!("taskdesk/{}", task.id);
+        if !std::path::Path::new(path).exists() {
+            require_main(project).await?;
+            git(&project.path, &["worktree", "add", "-b", &branch, path, "main"]).await?;
+        }
+        if git(path, &["branch", "--show-current"]).await? != branch { return Err("Task worktree is on an unexpected branch.".into()); }
+        project.path = path.clone();
+    }
+    Ok(())
+}
+async fn merge_task(task: &Task, project: &Project) -> Result<(), String> {
+    let path = task.worktree.as_deref().ok_or("Missing task worktree")?;
+    require_main(project).await?;
+    let branch = format!("taskdesk/{}", task.id);
+    if git(path, &["branch", "--show-current"]).await? != branch { return Err("Task worktree is on an unexpected branch.".into()); }
+    git(path, &["add", "--all"]).await?;
+    if !git(path, &["diff", "--cached", "--name-only"]).await?.is_empty() {
+        git(path, &["commit", "-m", &format!("Complete task: {}", task.title)]).await?;
+    }
+    if let Err(error) = git(&project.path, &["merge", "--no-edit", &branch]).await {
+        // Abort only the merge we started; preserve both branches for a retry.
+        if git(&project.path, &["rev-parse", "--verify", "MERGE_HEAD"]).await.is_ok() {
+            git(&project.path, &["merge", "--abort"]).await?;
+        }
+        return Err(format!("Merge failed. Resolve the task branch against main, then retry. {error}"));
+    }
+    Ok(())
+}
+async fn merge_worker(app: App, mut shutdown: watch::Receiver<bool>) {
+    loop {
+        if *shutdown.borrow() { break; }
+        let job = {
+            let mut store = app.lock().await;
+            let mut d = store.data.clone();
+            let index = if d.settings.paused { None } else { d.tasks.iter().position(|t| t.awaiting_merge && !t.merging && t.error.is_none()
+                && !d.tasks.iter().any(|other| other.project_id == t.project_id && other.status == "now" && other.worktree.is_none())) };
+            if let Some(index) = index {
+                d.tasks[index].merging = true;
+                let task = d.tasks[index].clone();
+                let project = d.projects.iter().find(|p| p.id == task.project_id).unwrap().clone();
+                match store.commit(d) { Ok(()) => Some((task, project)), Err(e) => { eprintln!("Cannot persist merge: {e}"); None } }
+            } else { None }
+        };
+        if let Some((task, project)) = job {
+            let result = merge_task(&task, &project).await;
+            if let Err(e) = update_task(&app, &task.id, |t| {
+                t.merging = false;
+                match result {
+                    Ok(()) => { t.awaiting_merge = false; t.error = None; t.message("system", "Merged into main."); }
+                    Err(e) => { t.error = Some(e.clone()); t.message("system", e); }
+                }
+            }).await { eprintln!("Cannot persist merge result: {e}"); }
+        } else {
+            tokio::select! { _ = shutdown.changed() => break, _ = tokio::time::sleep(std::time::Duration::from_millis(400)) => {} }
+        }
+    }
 }
 async fn worker(app: App, mut shutdown: watch::Receiver<bool>) {
     let mut runs = tokio::task::JoinSet::new();
@@ -456,11 +571,14 @@ async fn worker(app: App, mut shutdown: watch::Receiver<bool>) {
                 if let Err(e) = store.commit(d) { eprintln!("Cannot persist queue: {e}"); None } else { Some((task, project, settings)) }
             } else { None }
         };
-        if let Some((task, project, settings)) = job {
+        if let Some((mut task, mut project, settings)) = job {
             let app = app.clone();
             let mut shutdown = shutdown.clone();
             runs.spawn(async move {
-                let result = run_codex(&app, &task, &project, &settings, &mut shutdown).await;
+                let result = match prepare_worktree(&app, &mut task, &mut project, &settings).await {
+                    Ok(()) => run_codex(&app, &task, &project, &settings, &mut shutdown).await,
+                    Err(e) => Err(e),
+                };
                 let stopped = *shutdown.borrow();
                 if let Err(e) = update_task(&app, &task.id, |t| {
                     t.elapsed_ms += now().saturating_sub(t.started_at.unwrap_or(now())); t.started_at = None;
@@ -471,6 +589,7 @@ async fn worker(app: App, mut shutdown: watch::Receiver<bool>) {
                             t.status = if pending { "todo" } else { "done" }.into();
                             t.queued_at = now(); t.error = None;
                             if pending { t.attention = None; }
+                            t.awaiting_merge = !pending && t.attention.is_none() && t.worktree.is_some();
                             t.message("system", if pending { "Run ended. Your follow-up is queued." } else if t.attention.is_some() { "Task unfinished. Reply below to continue." } else { "Run completed." });
                         }
                         Err(e) => { t.status = if t.cancel || stopped { "future" } else { "done" }.into(); t.attention = if t.cancel || stopped { None } else { Some("failed".into()) }; t.error = Some(e.clone()); t.message("system", e); }
@@ -595,6 +714,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let file = dir.join("taskdesk.json");
     let mut data: Data = if file.exists() { serde_json::from_slice(&std::fs::read(&file)?)? } else { initial_data() };
     for t in &mut data.tasks {
+        t.merging = false;
         if t.status == "now" {
             t.elapsed_ms += data.saved_at.saturating_sub(t.started_at.unwrap_or(data.saved_at));
             t.status = "future".into(); t.started_at = None; t.cancel = false;
@@ -606,6 +726,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app: App = Arc::new(Mutex::new(store));
     let (stop, shutdown) = watch::channel(false);
     let cleanup = tokio::spawn(cleanup_worker(app.clone(), shutdown.clone()));
+    let merger = tokio::spawn(merge_worker(app.clone(), shutdown.clone()));
     let worker = tokio::spawn(worker(app.clone(), shutdown));
     let router = Router::new()
         .route("/", get(|| async { Html(include_str!("../web/index.html")) }))
@@ -620,6 +741,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Taskdesk running at http://127.0.0.1:{port}");
     axum::serve(listener, router).with_graceful_shutdown(async move { let _ = tokio::signal::ctrl_c().await; let _ = stop.send(true); }).await?;
     let _ = worker.await;
+    let _ = merger.await;
     let _ = cleanup.await;
     Ok(())
 }
@@ -701,19 +823,44 @@ mod tests {
         assert!(old.attachments.is_empty());
     }
     fn task(status: &str, queued_at: u64) -> Task {
-        Task { id: id(), project_id: "p".into(), title: "Test".into(), model: "".into(), status: status.into(), messages: vec![], created_at: 0, queued_at, elapsed_ms: 0, started_at: None, thread_id: None, error: None, sent_count: 0, cancel: false, cleanup_at: None, attention: None }
+        Task { id: id(), project_id: "p".into(), title: "Test".into(), model: "".into(), status: status.into(), messages: vec![], created_at: 0, queued_at, elapsed_ms: 0, started_at: None, thread_id: None, error: None, sent_count: 0, cancel: false, cleanup_at: None, attention: None, worktree: None, awaiting_merge: false, merging: false }
     }
     #[test]
-    fn queue_is_fifo_per_project_and_allows_other_projects() {
+    fn queue_is_fifo_and_sequential_by_default() {
         let mut d = initial_data(); d.tasks = vec![task("future", 0), task("todo", 20), task("todo", 10)];
         assert_eq!(next_task(&d), Some(2));
         d.tasks[2].status = "now".into(); assert_eq!(next_task(&d), None);
         d.tasks.push(task("todo", 30)); d.tasks[3].project_id = "other".into();
-        assert_eq!(next_task(&d), Some(3));
+        assert_eq!(next_task(&d), None);
         d.tasks[3].status = "now".into(); assert_eq!(next_task(&d), None);
-        d.tasks[2].status = "done".into(); assert_eq!(next_task(&d), Some(1));
+        d.tasks[2].status = "done".into(); d.tasks[3].status = "done".into(); assert_eq!(next_task(&d), Some(1));
         d.settings.paused = true; assert_eq!(next_task(&d), None);
         d.settings.paused = false; d.tasks[1].error = Some("failed".into()); assert_eq!(next_task(&d), None);
+    }
+    #[test]
+    fn parallel_queue_respects_global_limit_and_legacy_settings() {
+        let mut d = initial_data();
+        let mut old = serde_json::to_value(&d.settings).unwrap();
+        old.as_object_mut().unwrap().remove("max_workers");
+        old.as_object_mut().unwrap().remove("parallelism");
+        let settings: Settings = serde_json::from_value(old).unwrap();
+        assert_eq!(settings.max_workers, 4); assert!(!settings.parallelism);
+        d.settings.parallelism = true; d.settings.max_workers = 2;
+        d.tasks = vec![task("now", 0), task("todo", 1), task("todo", 2)];
+        assert_eq!(next_task(&d), None); // An existing main-worktree run must finish first.
+        d.tasks[0].worktree = Some("isolated".into());
+        assert_eq!(next_task(&d), Some(1));
+        d.tasks[1].status = "now".into(); d.tasks[1].worktree = Some("second".into());
+        d.tasks[2].project_id = "other".into();
+        assert_eq!(next_task(&d), None); // The limit spans projects.
+        d.tasks[0].status = "done".into(); d.tasks[0].awaiting_merge = true;
+        assert_eq!(next_task(&d), Some(2)); // Waiting merges do not consume a task worker.
+        d.settings.parallelism = false;
+        assert_eq!(next_task(&d), None);
+        d.tasks[1].status = "done".into();
+        assert_eq!(next_task(&d), Some(2));
+        d.tasks[2].project_id = "p".into();
+        assert_eq!(next_task(&d), None); // Drain merges before starting a direct main run.
     }
     #[test]
     fn captures_thread_messages_and_failures() {
