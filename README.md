@@ -12,6 +12,8 @@ Install Rust and Codex CLI, then run `codex login` if needed. From this folder:
 
 Open http://127.0.0.1:3030. The launcher builds the release executable and starts it in the current terminal. Ctrl+C stops the server and its current run. For development, use `cargo run`. The HTML, CSS and JavaScript are embedded in the executable, so rebuild after editing them.
 
+After changes, run `.\restart.ps1` to stop this checkout's existing server, rebuild the release version, start it in the background, and open your default browser when it is ready. This interrupts any running task; interrupted tasks return to Future. The script respects `TASKDESK_PORT` and `TASKDESK_DATA_DIR`.
+
 ## Workflow
 
 - Add a project using an existing absolute folder path.
