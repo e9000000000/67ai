@@ -5,6 +5,9 @@ use std::{path::PathBuf, sync::Arc, time::{SystemTime, UNIX_EPOCH}, process::Std
 use tokio::{io::{AsyncBufReadExt, AsyncWriteExt, BufReader}, process::Command, sync::{Mutex, watch}};
 
 type App = Arc<Mutex<Store>>;
+// Worktree setup, recovery, and merging must not edit main concurrently.
+static MAIN_GIT: Mutex<()> = Mutex::const_new(());
+const DIRTY_MAIN: &str = "Commit or stash changes in the main worktree before starting or merging parallel tasks.";
 type ApiResult = Result<Json<Value>, (StatusCode, String)>;
 fn now() -> u64 { SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64 }
 fn id() -> String { uuid::Uuid::new_v4().to_string() }
@@ -369,7 +372,15 @@ impl ProcessJob {
 #[cfg(windows)]
 impl Drop for ProcessJob { fn drop(&mut self) { unsafe { windows_sys::Win32::Foundation::CloseHandle(self.0); } } }
 
-async fn run_codex(app: &App, task: &Task, project: &Project, settings: &Settings, shutdown: &mut watch::Receiver<bool>) -> Result<(), String> {
+fn recovery_event(task: &mut Task, recovery: &mut Task, value: &Value) -> bool {
+    let ok = event(recovery, value);
+    for message in recovery.messages.drain(..) { task.message("activity", format!("Main worktree recovery: {}", message.text)); }
+    ok
+}
+async fn run_codex(app: &App, task: &Task, project: &Project, settings: &Settings, shutdown: &mut watch::Receiver<bool>, recovery: bool) -> Result<(), String> {
+    if *shutdown.borrow() || app.lock().await.data.tasks.iter().any(|t| t.id == task.id && t.cancel) { return Err("Run stopped.".into()); }
+    let mut recovery_state = task.clone();
+    recovery_state.messages.clear();
     let mut images = vec![];
     let store = app.lock().await;
     let schema = store.file.parent().unwrap().join("response-schema.json");
@@ -422,7 +433,11 @@ async fn run_codex(app: &App, task: &Task, project: &Project, settings: &Setting
             line = out.next_line(), if !stdout_done => match line.map_err(|e| e.to_string())? {
                 Some(line) => if let Ok(value) = serde_json::from_str::<Value>(&line) {
                     if value["type"] == "turn.completed" { completed = true; }
-                    update_task(app, &task.id, |t| { if !event(t, &value) { failed = true; } }).await?;
+                    update_task(app, &task.id, |t| {
+                        if recovery {
+                            if !recovery_event(t, &mut recovery_state, &value) { failed = true; }
+                        } else if !event(t, &value) { failed = true; }
+                    }).await?;
                 },
                 None => stdout_done = true,
             },
@@ -447,6 +462,7 @@ async fn run_codex(app: &App, task: &Task, project: &Project, settings: &Setting
     if !status.success() || !completed || failed {
         return Err(format!("Codex did not finish successfully ({status}). {}", stderr.trim()));
     }
+    if recovery && recovery_state.attention.is_some() { return Err("Hard-model recovery is unfinished. See the recovery messages and retry when resolved.".into()); }
     Ok(())
 }
 
@@ -477,13 +493,35 @@ async fn require_main(project: &Project) -> Result<(), String> {
         return Err("Parallel tasks require the project's main branch to be checked out.".into());
     }
     if !git(&project.path, &["status", "--porcelain"]).await?.is_empty() {
-        return Err("Commit or stash changes in the main worktree before starting or merging parallel tasks.".into());
+        return Err(DIRTY_MAIN.into());
     }
     Ok(())
 }
-async fn prepare_worktree(app: &App, task: &mut Task, project: &mut Project, settings: &Settings) -> Result<(), String> {
+async fn recover_main(app: &App, task: &Task, project: &Project, settings: &Settings, shutdown: &mut watch::Receiver<bool>) -> Result<(), String> {
+    match require_main(project).await {
+        Ok(()) => return Ok(()),
+        Err(e) if e == DIRTY_MAIN => {},
+        Err(e) => return Err(e),
+    }
+    if settings.hard_model.trim().is_empty() { return Err("Main worktree is dirty. Select a hard-task model in Settings for automatic recovery.".into()); }
+    update_task(app, &task.id, |t| t.message("system", "Main worktree has uncommitted changes. Running the hard-task model to fix it, then retrying automatically.")).await?;
+    let mut repair = task.clone();
+    repair.title = "Recover main worktree for parallel tasks".into();
+    repair.model = settings.hard_model.clone();
+    repair.thread_id = None;
+    repair.worktree = None;
+    repair.sent_count = 0;
+    repair.attention = Some("unconfirmed".into());
+    repair.messages.clear();
+    repair.message("user", "Parallel task startup or merge was blocked by uncommitted changes in this project's main worktree. Inspect git status and the diffs, preserve all existing work, and commit the changes appropriately so main is clean. You are authorized to fix this Git blocker only. Stay on main in this project; do not modify other worktrees, merge task branches, push, deploy, discard changes, or use destructive reset/clean commands. Do not implement the original task. If you cannot safely preserve and commit the changes, report the blocker. 67ai will verify main is clean and retry the original operation automatically.");
+    run_codex(app, &repair, project, settings, shutdown, true).await?;
+    require_main(project).await.map_err(|e| format!("Main worktree recovery did not resolve the blocker: {e}"))?;
+    update_task(app, &task.id, |t| t.message("system", "Main worktree recovered. Retrying automatically.")).await
+}
+async fn prepare_worktree(app: &App, task: &mut Task, project: &mut Project, settings: &Settings, shutdown: &mut watch::Receiver<bool>) -> Result<(), String> {
+    let _main_git = MAIN_GIT.lock().await;
     if task.worktree.is_none() && settings.parallelism {
-        require_main(project).await?;
+        recover_main(app, task, project, settings, shutdown).await?;
         let dir = {
             let store = app.lock().await;
             store.file.parent().unwrap().join("worktrees")
@@ -498,7 +536,7 @@ async fn prepare_worktree(app: &App, task: &mut Task, project: &mut Project, set
     if let Some(path) = &task.worktree {
         let branch = format!("67ai/{}", task.id);
         if !std::path::Path::new(path).exists() {
-            require_main(project).await?;
+            recover_main(app, task, project, settings, shutdown).await?;
             git(&project.path, &["worktree", "add", "-b", &branch, path, "main"]).await?;
         }
         let current_branch = git(path, &["branch", "--show-current"]).await?;
@@ -537,11 +575,18 @@ async fn merge_worker(app: App, mut shutdown: watch::Receiver<bool>) {
                 d.tasks[index].merging = true;
                 let task = d.tasks[index].clone();
                 let project = d.projects.iter().find(|p| p.id == task.project_id).unwrap().clone();
-                match store.commit(d) { Ok(()) => Some((task, project)), Err(e) => { eprintln!("Cannot persist merge: {e}"); None } }
+                let settings = d.settings.clone();
+                match store.commit(d) { Ok(()) => Some((task, project, settings)), Err(e) => { eprintln!("Cannot persist merge: {e}"); None } }
             } else { None }
         };
-        if let Some((task, project)) = job {
-            let result = merge_task(&task, &project).await;
+        if let Some((task, project, settings)) = job {
+            let result = {
+                let _main_git = MAIN_GIT.lock().await;
+                match recover_main(&app, &task, &project, &settings, &mut shutdown).await {
+                    Ok(()) => merge_task(&task, &project).await,
+                    Err(e) => Err(e),
+                }
+            };
             if let Err(e) = update_task(&app, &task.id, |t| {
                 t.merging = false;
                 match result {
@@ -575,8 +620,8 @@ async fn worker(app: App, mut shutdown: watch::Receiver<bool>) {
             let app = app.clone();
             let mut shutdown = shutdown.clone();
             runs.spawn(async move {
-                let result = match prepare_worktree(&app, &mut task, &mut project, &settings).await {
-                    Ok(()) => run_codex(&app, &task, &project, &settings, &mut shutdown).await,
+                let result = match prepare_worktree(&app, &mut task, &mut project, &settings, &mut shutdown).await {
+                    Ok(()) => run_codex(&app, &task, &project, &settings, &mut shutdown, false).await,
                     Err(e) => Err(e),
                 };
                 let stopped = *shutdown.borrow();
@@ -881,6 +926,54 @@ mod tests {
         assert_eq!(t.messages[0].text, "Finished");
         assert!(!event(&mut t, &json!({"type":"turn.failed", "error":{"message":"No access"}})));
         assert_eq!(t.messages[1].text, "No access");
+    }
+    #[test]
+    fn recovery_does_not_replace_task_conversation_or_outcome() {
+        let mut original = task("done", 0);
+        original.thread_id = Some("original-thread".into());
+        original.awaiting_merge = true;
+        original.message("user", "Original request");
+        original.sent_count = 1;
+        let mut repair = task("now", 0);
+        repair.attention = Some("unconfirmed".into());
+        assert!(recovery_event(&mut original, &mut repair, &json!({"type":"thread.started", "thread_id":"repair-thread"})));
+        for outcome in ["question", "completed"] {
+            assert!(recovery_event(&mut original, &mut repair, &json!({"type":"item.completed", "item":{"type":"agent_message", "text":json!({"outcome":outcome,"message":"Recovery reply"}).to_string()}})));
+            assert_eq!(repair.attention.as_deref(), if outcome == "completed" { None } else { Some(outcome) });
+            assert_eq!(original.attention, None);
+        }
+        assert_eq!(original.thread_id.as_deref(), Some("original-thread"));
+        assert_eq!(original.sent_count, 1);
+        assert!(original.awaiting_merge);
+        assert_eq!(original.messages[0].text, "Original request");
+        assert!(original.messages[1..].iter().all(|m| m.role == "activity"));
+        assert!(!recovery_event(&mut original, &mut repair, &json!({"type":"turn.failed", "error":{"message":"Failed"}})));
+    }
+    #[tokio::test]
+    async fn recovery_only_runs_for_dirty_main_and_uses_hard_model() {
+        let dir = std::env::current_dir().unwrap().join("tmp").join(format!("recovery-{}", id()));
+        let repo = dir.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let project = Project { id: "p".into(), name: "Test".into(), path: repo.to_string_lossy().into() };
+        git(&project.path, &["init", "-b", "main"]).await.unwrap();
+        let mut settings = initial_data().settings;
+        settings.hard_model.clear();
+        settings.codex_path = dir.join("missing-codex.exe").to_string_lossy().into();
+        let original = task("now", 0);
+        let mut data = initial_data();
+        data.tasks.push(original.clone());
+        let app = Arc::new(Mutex::new(Store { data, file: dir.join("state.json") }));
+        let (_sender, mut shutdown) = watch::channel(false);
+        recover_main(&app, &original, &project, &settings, &mut shutdown).await.unwrap();
+        std::fs::write(repo.join("work.txt"), "preserve this work").unwrap();
+        assert_eq!(require_main(&project).await.unwrap_err(), DIRTY_MAIN);
+        assert!(recover_main(&app, &original, &project, &settings, &mut shutdown).await.unwrap_err().contains("Select a hard-task model"));
+        settings.hard_model = "hard-model".into();
+        assert!(recover_main(&app, &original, &project, &settings, &mut shutdown).await.unwrap_err().contains("Could not start Codex"));
+        assert_eq!(std::fs::read_to_string(repo.join("work.txt")).unwrap(), "preserve this work");
+        git(&project.path, &["symbolic-ref", "HEAD", "refs/heads/other"]).await.unwrap();
+        assert!(recover_main(&app, &original, &project, &settings, &mut shutdown).await.unwrap_err().contains("main branch"));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
     #[test]
     fn structured_outcomes_keep_questions_separate_from_completion() {
