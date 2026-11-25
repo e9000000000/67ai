@@ -58,12 +58,17 @@ function modelOptions(value = '', withConfig = true) {
 function renderBoard() {
   const signature = JSON.stringify([data, projectId]);
   if (lastBoard === signature) return; lastBoard = signature;
+  const board = $('#board');
+  const boardScroll = board.scrollTop;
+  const columnScroll = new Map([...board.querySelectorAll('.column')].map(column => [column.dataset.status, $('.column-tasks', column).scrollTop]));
   $('#project-tabs').innerHTML = [{id:'',name:'All projects'}, ...data.projects].map(p => `<button class="project-tab ${p.id===projectId?'active':''}" data-project="${escape(p.id)}" aria-current="${p.id===projectId?'page':'false'}" title="${escape(p.path || 'All projects')}">${escape(p.name)}</button>`).join('');
   const tasks = data.tasks.filter(t => !projectId || t.project_id === projectId);
-  $('#board').innerHTML = states.map(status => {
+  board.innerHTML = states.map(status => {
     const items = tasks.filter(t => t.status === status).sort((a,b) => status === 'todo' ? a.queued_at-b.queued_at : b.created_at-a.created_at);
     return `<section class="column" data-status="${status}" aria-label="${status} tasks"><div class="column-head"><h2>${status[0].toUpperCase()+status.slice(1)} <span class="column-count">${items.length}</span></h2><button class="icon-button" data-new="${status === 'future' ? 'future' : 'todo'}" aria-label="Add task from ${status}">+</button></div><div class="column-tasks">${items.map(card).join('') || '<p class="empty-column">No tasks</p>'}</div></section>`;
   }).join('');
+  board.querySelectorAll('.column').forEach(column => { $('.column-tasks', column).scrollTop = columnScroll.get(column.dataset.status) || 0; });
+  board.scrollTop = boardScroll;
 }
 function difficultyBadge(t) {
   const {easy_model, hard_model} = data.settings;
