@@ -67,7 +67,7 @@ impl Task {
 #[derive(Clone, Serialize, Deserialize)]
 struct Template { id: String, name: String, content: String }
 #[derive(Clone, Serialize, Deserialize)]
-struct Settings { default_model: String, codex_path: String, paused: bool }
+struct Settings { default_model: String, #[serde(default)] hard_model: String, #[serde(default)] easy_model: String, codex_path: String, paused: bool }
 #[derive(Clone, Serialize, Deserialize)]
 struct Data { projects: Vec<Project>, tasks: Vec<Task>, templates: Vec<Template>, settings: Settings, saved_at: u64 }
 struct Store { data: Data, file: PathBuf }
@@ -114,7 +114,7 @@ fn initial_data() -> Data {
     }).unwrap_or_default();
     Data {
         projects: vec![], tasks: vec![], saved_at: now(),
-        settings: Settings { default_model: model, codex_path: detect_codex(), paused: false },
+        settings: Settings { hard_model: model.clone(), easy_model: model.clone(), default_model: model, codex_path: detect_codex(), paused: false },
         templates: vec![
             Template { id: id(), name: "Simple & direct".into(), content: "# Project instructions\n\nUse simple, straightforward code and existing tools. Match the existing style.\nAvoid speculative abstractions and unrelated changes.\nRun relevant checks and report what changed, what passed, and any remaining issues.\nWork sequentially. Do not spawn subagents or delegate work.\n".into() },
             Template { id: id(), name: "Careful maintenance".into(), content: "# Project instructions\n\nRead the surrounding code before editing. Keep changes focused on the task.\nPreserve public interfaces unless the task requires a change.\nAdd a regression test for bug fixes where practical. Run relevant existing tests.\nReport the cause, fix, and validation. Work alone, without subagents.\n".into() },
@@ -140,7 +140,7 @@ enum Action {
     DeleteTask { id: String },
     ApproveTask { id: String },
     ReviveTask { id: String },
-    Settings { default_model: String, codex_path: String, paused: bool },
+    Settings { default_model: String, #[serde(default)] hard_model: String, #[serde(default)] easy_model: String, codex_path: String, paused: bool },
     SaveTemplate { id: Option<String>, name: String, content: String },
     DeleteTemplate { id: String },
     SaveAgents { project_id: String, content: String, original: String },
@@ -220,9 +220,9 @@ async fn action(State(app): State<App>, Json(action): Json<Action>) -> ApiResult
             let t = task_mut(&mut d, &id)?; idle(t)?;
             t.cleanup_at = None; t.error = None;
         }
-        Action::Settings { default_model, codex_path, paused } => {
+        Action::Settings { default_model, hard_model, easy_model, codex_path, paused } => {
             nonempty(&codex_path, "Codex executable")?;
-            d.settings = Settings { default_model: default_model.trim().into(), codex_path: codex_path.trim().into(), paused };
+            d.settings = Settings { default_model: default_model.trim().into(), hard_model: hard_model.trim().into(), easy_model: easy_model.trim().into(), codex_path: codex_path.trim().into(), paused };
         }
         Action::SaveTemplate { id: key, name, content } => {
             nonempty(&name, "Template name")?;

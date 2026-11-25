@@ -36,7 +36,7 @@ try {
   assert(imageSources.includes('blob:'), 'Local attachment previews need blob: image URLs');
   const duplicate=spawnSync(path.resolve('target/debug/taskdesk.exe'),[],{env:{...process.env,TASKDESK_PORT:'3033',TASKDESK_DATA_DIR:root},windowsHide:true,encoding:'utf8',timeout:3000});
   assert.equal(duplicate.status,1);assert.match(duplicate.stderr,/already open/);
-  let d=await state();const settings={...d.settings,paused:true};await action({action:'settings',...settings});
+  let d=await state();const settings={...d.settings,hard_model:'hard-test-model',easy_model:'easy-test-model',paused:true};await action({action:'settings',...settings});
   const projectA=path.join(root,'project-a'), projectB=path.join(root,'project-b');
   await mkdir(projectA);await mkdir(projectB);
   const a=(await action({action:'add_project',name:'A',path:projectA})).id;
@@ -150,7 +150,7 @@ try {
   await action({action:'stop_task',id:parallel});
   await until(d=>d.tasks.find(t=>t.id===parallel).status==='future');
   const interrupted=await create(b,'WAIT_TEST restart');await until(d=>d.tasks.find(t=>t.id===interrupted).thread_id);
-  await stop();await start();d=await state();assert.equal(d.tasks.find(t=>t.id===interrupted).status,'future');
+  await stop();await start();d=await state();assert.equal(d.settings.hard_model,settings.hard_model);assert.equal(d.settings.easy_model,settings.easy_model);assert.equal(d.tasks.find(t=>t.id===interrupted).status,'future');
   assert.equal(d.tasks.find(t=>t.id===attached).messages[0].attachments[0].name,'screen.png');
   assert.equal(await (await fetch(`${url}/api/attachments/${document.id}`)).text(),'Attachment contents');
   assert.equal(d.templates.find(t=>t.name==='Shared').content,'Across projects');
