@@ -30,7 +30,7 @@ fn main() {
                 let result = std::fs::read_to_string(dir.join(file)).unwrap_or_else(|_| "{\"data\":[],\"nextCursor\":null}".into());
                 println!("{{\"id\":2,\"result\":{result}}}");
             } else if line.contains("thread/delete") {
-                if line.contains("fail-delete") {
+                if line.contains("fail-delete") || (line.contains("recoverable-delete") && std::path::PathBuf::from(std::env::var("67AI_DATA_DIR").unwrap()).join("cleanup-blocked").exists()) {
                     println!(r#"{{"id":2,"error":{{"message":"Deletion failed"}}}}"#);
                 } else {
                     let dir = std::env::var("67AI_DATA_DIR").unwrap();
@@ -49,8 +49,58 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     assert!(args.iter().any(|a| a == "--dangerously-bypass-approvals-and-sandbox"));
     assert!(!args.iter().any(|a| a == "--sandbox" || a.starts_with("approval_policy=")));
+    if prompt.starts_with("Task: RECOVERY_TEST") || prompt.starts_with("Task: Recover failed operation\n") {
+        let title = prompt.lines().next().unwrap();
+        let dir = std::path::PathBuf::from(std::env::var("67AI_DATA_DIR").unwrap());
+        let mut log = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("recovery-runs.txt")).unwrap();
+        writeln!(log, "{args:?}\n{prompt}\nEND RUN").unwrap();
+        let recovering = prompt.contains("Automatic recovery:") || prompt.starts_with("Task: Recover failed operation\n");
+        if prompt.contains("PARALLEL_TEST") && !recovering { std::fs::write("task-result.txt", "Task changes").unwrap(); }
+        if recovering {
+            assert!(args.windows(2).any(|a| a == ["--model", "hard-recovery-model"]));
+            assert!(!args.iter().any(|a| a == "resume"));
+        }
+        let thread = if prompt.contains("approved task cleanup") { "cleanup-recovery".to_string() } else { format!("recovery-{recovering}") };
+        println!(r#"{{"type":"thread.started","thread_id":"{thread}"}}"#);
+        std::io::stdout().flush().unwrap();
+        std::thread::sleep(Duration::from_millis(600));
+        if prompt.starts_with("Task: Recover failed operation\n") {
+            if prompt.contains("approved task cleanup") { std::fs::remove_file(dir.join("cleanup-blocked")).unwrap(); }
+            else if std::path::Path::new("recovery-noop").exists() { /* deliberately leave the blocker */ }
+            else if std::path::Path::new(".git/hooks/pre-commit").exists() {
+                std::fs::remove_file(".git/hooks/pre-commit").unwrap();
+            } else {
+                assert!(std::process::Command::new("git").args(["add", "--all"]).output().unwrap().status.success());
+                assert!(std::process::Command::new("git").args(["commit", "-m", "Preserve pending work"]).output().unwrap().status.success());
+            }
+        } else if title.contains("ALWAYS_FAIL") || (!recovering && title.contains("PROCESS_FAIL")) {
+            println!(r#"{{"type":"turn.failed","error":{{"message":"Fixture process failure"}}}}"#);
+            std::process::exit(1);
+        }
+        let outcome = if title.contains("QUESTION") { "question" }
+            else if !recovering && title.contains("BLOCKED") { "blocked" }
+            else if !recovering && title.contains("REFUSED") { "refused" }
+            else { "completed" };
+        if prompt.contains("You are a separate AI reviewer.") {
+            if recovering {
+                println!(r#"{{"type":"item.completed","item":{{"type":"agent_message","text":"{{\"decision\":\"approve\",\"message\":\"Review recovered\"}}"}}}}"#);
+            } else {
+                println!(r#"{{"type":"item.completed","item":{{"type":"agent_message","text":"Invalid review verdict"}}}}"#);
+            }
+        } else if prompt.contains("You are running a Gen task.") {
+            assert!(prompt.contains("NEVER implement anything"));
+            println!(r#"{{"type":"item.completed","item":{{"type":"agent_message","text":"{{\"outcome\":\"{outcome}\",\"message\":\"Research result\",\"tasks\":[],\"content\":null}}"}}}}"#);
+        } else if !recovering && title.contains("UNCONFIRMED") {
+            println!(r#"{{"type":"item.completed","item":{{"type":"agent_message","text":"Plain reply"}}}}"#);
+        } else {
+            println!(r#"{{"type":"item.completed","item":{{"type":"agent_message","text":"{{\"outcome\":\"{outcome}\",\"message\":\"Fixture result\"}}"}}}}"#);
+        }
+        println!(r#"{{"type":"turn.completed"}}"#);
+        return;
+    }
     if prompt.contains("You are running a Gen task.") {
-        assert!(args.windows(2).any(|a| a == ["--model", "gen-test-model"]));
+        let model = if prompt.contains("Automatic recovery:") { "hard-review-model" } else { "gen-test-model" };
+        assert!(args.windows(2).any(|a| a == ["--model", model]));
         assert!(prompt.contains("NEVER implement anything"));
         assert!(prompt.contains("reverse engineering"));
         assert!(prompt.contains("Existing project tasks"));

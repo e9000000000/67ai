@@ -590,7 +590,7 @@ fn review_event(review: &mut Task, value: &Value) -> bool {
 
 fn recovery_event(task: &mut Task, recovery: &mut Task, value: &Value) -> bool {
     let ok = event(recovery, value);
-    for message in recovery.messages.drain(..) { task.message("activity", format!("Main worktree recovery: {}", message.text)); }
+    for message in recovery.messages.drain(..) { task.message("activity", format!("Hard-model recovery: {}", message.text)); }
     ok
 }
 fn limit_error(text: &str) -> bool {
@@ -736,7 +736,9 @@ async fn run_codex_inner(app: &App, task: &Task, project: &Project, settings: &S
                                 if !t.session_ids.iter().any(|s| s == id) { t.session_ids.push(id.into()); }
                             }
                         }
-                        if task.review_pending {
+                        if recovery {
+                            if !recovery_event(t, &mut recovery_state, &value) { failed = true; }
+                        } else if task.review_pending {
                             if !review_event(&mut recovery_state, &value) { failed = true; }
                         } else if generating && value["type"] == "item.completed" && value["item"]["type"] == "agent_message" {
                             let text = value["item"]["text"].as_str().unwrap_or("");
@@ -744,8 +746,6 @@ async fn run_codex_inner(app: &App, task: &Task, project: &Project, settings: &S
                                 Ok(reply) if reply.valid() && (if task.content_planning { reply.tasks.is_empty() && (reply.outcome != "completed" || reply.content.is_some()) } else { reply.content.is_none() }) => { gen_reply = Some(reply); }
                                 _ => { gen_reply = None; t.message("assistant", text); }
                             }
-                        } else if recovery {
-                            if !recovery_event(t, &mut recovery_state, &value) { failed = true; }
                         } else if !event(t, &value) { failed = true; }
                     }).await?;
                 },
@@ -789,7 +789,7 @@ async fn run_codex_inner(app: &App, task: &Task, project: &Project, settings: &S
     if !successful_exit || !completed || failed {
         return Err(format!("Codex did not finish successfully ({status}). {}", stderr.trim()));
     }
-    if recovery && recovery_state.attention.is_some() { return Err("Hard-model recovery is unfinished. See the recovery messages and retry when resolved.".into()); }
+    if recovery && recovery_state.attention.is_some() { return Err("Hard-model recovery could not finish. See the recovery messages for the remaining blocker.".into()); }
     if task.review_pending {
         if recovery_state.attention.as_deref() == Some("unconfirmed") || !recovery_state.messages.iter().any(|m| m.role == "assistant") {
             return Err("AI review did not return a valid decision. Retry AI approve.".into());
@@ -798,6 +798,36 @@ async fn run_codex_inner(app: &App, task: &Task, project: &Project, settings: &S
     }
     if generating { return gen_reply.map(RunResult::Gen).ok_or_else(|| "Gen did not return valid task proposals. Reply or retry to continue.".into()); }
     Ok(RunResult::Completed)
+}
+
+async fn run_with_recovery(app: &App, task: &Task, project: &Project, settings: &Settings, shutdown: &mut watch::Receiver<bool>) -> Result<RunResult, String> {
+    let result = run_codex(app, task, project, settings, shutdown, false).await;
+    let mut retry = app.lock().await.data.tasks.iter().find(|t| t.id == task.id).cloned().ok_or("Task not found")?;
+    let problem = match &result {
+        Err(e) => Some(e.clone()),
+        Ok(RunResult::Gen(reply)) if matches!(reply.outcome.as_str(), "blocked" | "refused") => Some(reply.message.clone()),
+        Ok(RunResult::Completed) if retry.attention.as_deref().is_some_and(|a| a != "question") =>
+            Some(retry.messages.iter().rev().find(|m| m.role == "assistant").map(|m| m.text.clone()).unwrap_or_else(|| "Completion was not confirmed".into())),
+        _ => None,
+    };
+    let Some(problem) = problem else { return result; };
+    if !can_recover(app, task, shutdown, &problem).await { return result; }
+    if settings.hard_model.trim().is_empty() { return Err(format!("{problem} Select a hard-task model in Settings for automatic recovery.")); }
+    update_task(app, &task.id, |t| {
+        t.attention = Some("unconfirmed".into()); t.error = None;
+        t.message("activity", format!("Recovering automatically with the Hard model: {problem}"));
+    }).await?;
+    retry.model = settings.hard_model.clone();
+    retry.thread_id = None;
+    retry.sent_count = 0;
+    // Follow-ups received during this run remain queued for the next turn.
+    retry.messages = retry.messages.into_iter().enumerate()
+        .filter(|(i, m)| *i < task.messages.len() || !matches!(m.role.as_str(), "user" | "reviewer"))
+        .map(|(_, m)| m).collect();
+    retry.message("user", format!("Automatic recovery: the previous attempt could not finish: {problem}\n\nInspect the actual state and solve the underlying technical problem, then complete the original request. Do not ask the user to fix problems you can solve. Preserve existing work and follow the original task scope and permissions. Genuine questions requiring a user decision may be asked. If you cannot finish, explain what you tried and the concrete remaining blocker."));
+    // Fresh context includes the failed attempt; retain the task's research/review restrictions.
+    for message in &mut retry.messages { if message.role == "assistant" { message.role = "reviewer".into(); } }
+    run_codex(app, &retry, project, settings, shutdown, false).await
 }
 
 fn next_task(d: &Data) -> Option<usize> {
@@ -835,26 +865,51 @@ async fn require_main(project: &Project) -> Result<(), String> {
 async fn recover_main(app: &App, task: &Task, project: &Project, settings: &Settings, shutdown: &mut watch::Receiver<bool>) -> Result<(), String> {
     match require_main(project).await {
         Ok(()) => return Ok(()),
-        Err(e) if e == DIRTY_MAIN => {},
-        Err(e) => return Err(e),
+        Err(e) => {
+            repair_operation(app, task, project, settings, shutdown, &e,
+                "Recover the project's main worktree so parallel tasks can start or merge. Inspect Git status and diffs. Preserve all existing work and commit pending changes appropriately. The project must be a clean Git repository root on main. Do not switch branches if that would disturb existing work. Do not implement the original task, modify other worktrees, merge task branches, push, deploy, discard changes, or use destructive reset/clean commands.").await?;
+        },
     }
-    if settings.hard_model.trim().is_empty() { return Err("Main worktree is dirty. Select a hard-task model in Settings for automatic recovery.".into()); }
-    update_task(app, &task.id, |t| t.message("system", "Main worktree has uncommitted changes. Running the hard-task model to fix it, then retrying automatically.")).await?;
+    require_main(project).await.map_err(|e| format!("Hard-model recovery failed: {e}"))
+}
+async fn repair_operation(app: &App, task: &Task, project: &Project, settings: &Settings, shutdown: &mut watch::Receiver<bool>, error: &str, instructions: &str) -> Result<(), String> {
+    if !can_recover(app, task, shutdown, error).await { return Err(error.into()); }
+    if settings.hard_model.trim().is_empty() { return Err(format!("{error} Select a hard-task model in Settings for automatic recovery.")); }
+    update_task(app, &task.id, |t| t.message("activity", format!("Recovering automatically with the Hard model: {error}"))).await?;
     let mut repair = task.clone();
-    repair.title = "Recover main worktree for parallel tasks".into();
+    repair.title = "Recover failed operation".into();
     repair.model = settings.hard_model.clone();
     repair.thread_id = None;
     repair.worktree = None;
     repair.sent_count = 0;
+    repair.review_pending = false;
+    repair.difficulty = Some(Difficulty::Hard);
+    repair.content_planning = false;
     repair.attention = Some("unconfirmed".into());
     repair.messages.clear();
-    repair.message("user", "Parallel task startup or merge was blocked by uncommitted changes in this project's main worktree. Inspect git status and the diffs, preserve all existing work, and commit the changes appropriately so main is clean. You are authorized to fix this Git blocker only. Stay on main in this project; do not modify other worktrees, merge task branches, push, deploy, discard changes, or use destructive reset/clean commands. Do not implement the original task. If you cannot safely preserve and commit the changes, report the blocker. 67ai will verify main is clean and retry the original operation automatically.");
-    run_codex(app, &repair, project, settings, shutdown, true).await?;
-    require_main(project).await.map_err(|e| format!("Main worktree recovery did not resolve the blocker: {e}"))?;
-    update_task(app, &task.id, |t| t.message("system", "Main worktree recovered. Retrying automatically.")).await
+    repair.message("user", format!("An operation failed: {error}\n\n{instructions}\n\nFix the underlying problem within this scope. Do not ask the user to solve technical problems you can fix. Preserve user data and existing sessions. If recovery is impossible, explain the concrete blocker. 67ai will retry and verify the operation automatically."));
+    run_codex(app, &repair, project, settings, shutdown, true).await
+        .map(|_| ()).map_err(|e| if e == LIMIT_PAUSED { e } else { format!("Hard-model recovery failed: {e}") })
+}
+async fn can_recover(app: &App, task: &Task, shutdown: &watch::Receiver<bool>, error: &str) -> bool {
+    error != LIMIT_PAUSED && !error.starts_with("Hard-model recovery failed:") && !*shutdown.borrow()
+        && !app.lock().await.data.tasks.iter().any(|t| t.id == task.id && t.cancel)
 }
 async fn prepare_worktree(app: &App, task: &mut Task, project: &mut Project, settings: &Settings, shutdown: &mut watch::Receiver<bool>) -> Result<(), String> {
     let _main_git = MAIN_GIT.lock().await;
+    let original = project.clone();
+    match prepare_worktree_inner(app, task, project, settings, shutdown).await {
+        Ok(()) => Ok(()),
+        Err(e) if can_recover(app, task, shutdown, &e).await => {
+            repair_operation(app, task, &original, settings, shutdown, &e,
+                &format!("Repair only this task's Git worktree setup. Task branch: 67ai/{}. Assigned worktree: {:?}. Preserve existing branches, files and other worktrees. Do not implement the task, push, deploy, or discard work. Leave main clean; 67ai will retry worktree creation and branch verification.", task.id, task.worktree)).await?;
+            prepare_worktree_inner(app, task, project, settings, shutdown).await
+                .map_err(|e| if e == LIMIT_PAUSED { e } else { format!("Hard-model recovery failed: {e}") })
+        },
+        Err(e) => Err(e),
+    }
+}
+async fn prepare_worktree_inner(app: &App, task: &mut Task, project: &mut Project, settings: &Settings, shutdown: &mut watch::Receiver<bool>) -> Result<(), String> {
     if task.worktree.is_none() && settings.parallelism && matches!(task.execution_mode, ExecutionMode::Worktree) {
         recover_main(app, task, project, settings, shutdown).await?;
         let dir = {
@@ -881,6 +936,7 @@ async fn prepare_worktree(app: &App, task: &mut Task, project: &mut Project, set
     Ok(())
 }
 async fn resolve_merge(app: &App, task: &Task, project: &Project, settings: &Settings, shutdown: &mut watch::Receiver<bool>) -> Result<(), String> {
+    if settings.hard_model.trim().is_empty() { return Err("Select a hard-task model in Settings for automatic recovery.".into()); }
     update_task(app, &task.id, |t| t.message("system", "Resolving merge conflicts automatically with the hard-task model.")).await?;
     let mut repair = task.clone();
     repair.title = "Resolve parallel task merge conflicts".into();
@@ -923,7 +979,7 @@ async fn merge_task(app: &App, task: &Task, project: &Project, settings: &Settin
                 git(&project.path, &["merge", "--abort"]).await?;
             }
             if error == LIMIT_PAUSED { return Err(error); }
-            return Err(format!("Merge failed. Automatic resolution could not finish; retry merge. {error}"));
+            return Err(format!("Hard-model recovery failed: Merge failed. Automatic resolution could not finish. {error}"));
         }
     }
     require_main(project).await?;
@@ -950,9 +1006,19 @@ async fn merge_worker(app: App, mut shutdown: watch::Receiver<bool>) {
         if let Some((task, project, settings)) = job {
             let result = {
                 let _main_git = MAIN_GIT.lock().await;
-                match recover_main(&app, &task, &project, &settings, &mut shutdown).await {
+                let result = match recover_main(&app, &task, &project, &settings, &mut shutdown).await {
                     Ok(()) => merge_task(&app, &task, &project, &settings, &mut shutdown).await,
                     Err(e) => Err(e),
+                };
+                match result {
+                    Err(e) if can_recover(&app, &task, &shutdown, &e).await => {
+                        match repair_operation(&app, &task, &project, &settings, &mut shutdown, &e,
+                            &format!("Repair the failed merge prerequisites for task {}. Task worktree: {:?}. Preserve both main and task changes. Only repair Git or local tooling problems for this merge; do not implement unrelated work, push, deploy, discard changes, or modify other tasks' worktrees. Leave main clean. 67ai will retry the merge itself.", task.title, task.worktree)).await {
+                            Ok(()) => merge_task(&app, &task, &project, &settings, &mut shutdown).await,
+                            Err(e) => Err(e),
+                        }
+                    },
+                    result => result,
                 }
             };
             if let Err(e) = update_task(&app, &task.id, |t| {
@@ -1046,11 +1112,11 @@ async fn worker(app: App, mut shutdown: watch::Receiver<bool>) {
             runs.spawn(async move {
                 let result = if task.review_pending {
                     if let Some(path) = &task.worktree { project.path = path.clone(); }
-                    run_codex(&app, &task, &project, &settings, &mut shutdown, false).await
+                    run_with_recovery(&app, &task, &project, &settings, &mut shutdown).await
                 } else if task.is_gen() {
-                    run_codex(&app, &task, &project, &settings, &mut shutdown, false).await
+                    run_with_recovery(&app, &task, &project, &settings, &mut shutdown).await
                 } else { match prepare_worktree(&app, &mut task, &mut project, &settings, &mut shutdown).await {
-                    Ok(()) => run_codex(&app, &task, &project, &settings, &mut shutdown, false).await,
+                    Ok(()) => run_with_recovery(&app, &task, &project, &settings, &mut shutdown).await,
                     Err(e) => Err(e),
                 } };
                 let stopped = *shutdown.borrow();
@@ -1158,12 +1224,32 @@ async fn codex_request(executable: &str, method: &str, params: Value) -> Result<
     result
 }
 
-async fn cleanup_approved(app: &App) {
+async fn cleanup_approved(app: &App, shutdown: &mut watch::Receiver<bool>) {
     // Serialize expiry with revive/send actions so a cancelled timer cannot delete a session.
     let mut store = app.lock().await;
+    if store.data.codex_paused_until > now() { return; }
     let expired: Vec<Task> = store.data.tasks.iter().filter(|t| t.status == "done" && t.cleanup_at.is_some_and(|at| at <= now())).cloned().collect();
     for task in expired {
-        let result = cleanup::task_resources(&store, &task).await;
+        if !store.data.tasks.iter().any(|t| t.id == task.id && t.status == "done" && t.cleanup_at == task.cleanup_at) { continue; }
+        let mut result = cleanup::task_resources(&store, &task).await;
+        if let Err(error) = &result {
+            if let Some(project) = store.data.projects.iter().find(|p| p.id == task.project_id).cloned() {
+                let settings = store.data.settings.clone();
+                let error = error.clone();
+                drop(store);
+                result = repair_operation(app, &task, &project, &settings, shutdown, &error,
+                    "Repair only local tooling prerequisites preventing approved task cleanup. Do not delete sessions, files, branches, or worktrees yourself: 67ai will retry its guarded cleanup. Do not edit project source, board data or user data, change branches, deploy, or stop user processes. Diagnose the actual failure; never bypass ownership checks or expand the cleanup scope.").await;
+                store = app.lock().await;
+                if *shutdown.borrow() { return; }
+                // Revive or feedback while recovery ran cancels deletion.
+                if !store.data.tasks.iter().any(|t| t.id == task.id && t.status == "done" && t.cleanup_at == task.cleanup_at) { continue; }
+                if result.is_ok() {
+                    let current = store.data.tasks.iter().find(|t| t.id == task.id).unwrap();
+                    result = cleanup::task_resources(&store, current).await;
+                }
+                if result.as_ref().is_err_and(|e| e == LIMIT_PAUSED) { continue; }
+            }
+        }
         let mut d = store.data.clone();
         if let Err(e) = result {
             let t = d.tasks.iter_mut().find(|t| t.id == task.id).unwrap();
@@ -1189,7 +1275,7 @@ async fn cleanup_approved(app: &App) {
 async fn cleanup_worker(app: App, mut shutdown: watch::Receiver<bool>) {
     loop {
         if *shutdown.borrow() { break; }
-        cleanup_approved(&app).await;
+        cleanup_approved(&app, &mut shutdown).await;
         tokio::select! { _ = shutdown.changed() => break, _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {} }
     }
 }
@@ -1576,7 +1662,7 @@ mod tests {
         let _ = action(State(app.clone()), Json(Action::ApproveTask { id: key.clone() })).await.unwrap();
         let deadline = app.lock().await.data.tasks[0].cleanup_at.unwrap();
         assert!(deadline > now() + 1_790_000);
-        cleanup_approved(&app).await;
+        cleanup_approved(&app, &mut watch::channel(false).1).await;
         assert_eq!(app.lock().await.data.tasks.len(), 1);
         let _ = action(State(app.clone()), Json(Action::ApproveTask { id: key.clone() })).await.unwrap();
         assert_eq!(app.lock().await.data.tasks[0].cleanup_at, Some(deadline));
@@ -1601,7 +1687,7 @@ mod tests {
             store.data.tasks[0].cleanup_at = Some(0);
             store.data.tasks[0].thread_id = Some(id());
         }
-        cleanup_approved(&app).await;
+        cleanup_approved(&app, &mut watch::channel(false).1).await;
         {
             let mut store = app.lock().await;
             assert!(store.data.tasks[0].error.as_ref().unwrap().contains("Cleanup failed"));
@@ -1609,7 +1695,7 @@ mod tests {
             store.data.tasks[0].thread_id = None;
             store.data.tasks[0].cleanup_at = Some(0);
         }
-        cleanup_approved(&app).await;
+        cleanup_approved(&app, &mut watch::channel(false).1).await;
         assert!(app.lock().await.data.tasks.is_empty());
     }
 
@@ -1727,7 +1813,7 @@ mod tests {
         assert!(!recovery_event(&mut original, &mut repair, &json!({"type":"turn.failed", "error":{"message":"Failed"}})));
     }
     #[tokio::test]
-    async fn recovery_only_runs_for_dirty_main_and_uses_hard_model() {
+    async fn recovery_handles_main_prerequisites_and_uses_hard_model() {
         let dir = std::env::current_dir().unwrap().join("tmp").join(format!("recovery-{}", id()));
         let repo = dir.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
@@ -1749,7 +1835,8 @@ mod tests {
         assert!(recover_main(&app, &original, &project, &settings, &mut shutdown).await.unwrap_err().contains("Could not start Codex"));
         assert_eq!(std::fs::read_to_string(repo.join("work.txt")).unwrap(), "preserve this work");
         git(&project.path, &["symbolic-ref", "HEAD", "refs/heads/other"]).await.unwrap();
-        assert!(recover_main(&app, &original, &project, &settings, &mut shutdown).await.unwrap_err().contains("main branch"));
+        assert!(recover_main(&app, &original, &project, &settings, &mut shutdown).await.unwrap_err().contains("Could not start Codex"));
+        assert!(app.lock().await.data.tasks[0].messages.iter().any(|m| m.text.contains("main branch")));
         std::fs::remove_dir_all(&dir).unwrap();
     }
     #[test]

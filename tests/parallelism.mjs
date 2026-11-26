@@ -141,7 +141,7 @@ try {
   assert.match(d.tasks.find(t=>t.id===conflict).error,/unresolved conflicts/);
   assert.equal(git(repo,'status','--porcelain'),'');
   // Retry invokes the resolver again, then commits without manual Git repair.
-  settings={...settings,hard_model:''};
+  settings={...settings,hard_model:'merge-success'};
   await action({action:'settings',...settings,paused:false});
   await action({action:'retry_merge',id:conflict});
   d=await until(d=>!d.tasks.find(t=>t.id===conflict).awaiting_merge);
@@ -232,6 +232,8 @@ try {
   await until(d=>d.tasks.find(t=>t.id===raw).status==='done');
   assert.equal((await state()).tasks.find(t=>t.id===raw).worktree,null);
   // Dirty main is reported without running Codex or changing the user's files.
+  settings={...settings,hard_model:''};
+  await action({action:'settings',...settings,paused:false});
   await writeFile(path.join(repo,'base.txt'),'uncommitted\n');
   const dirty=await create('Dirty');
   d=await until(d=>d.tasks.find(t=>t.id===dirty).error);
