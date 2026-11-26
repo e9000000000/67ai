@@ -260,3 +260,8 @@ input[type="checkbox"] { width: auto; accent-color: var(--accent); }
 .sample-report { white-space: pre-wrap; overflow-wrap: anywhere; padding: 14px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; }
 #content-plan details { margin: 16px 0; }
 #sample-history { overflow-wrap: anywhere; }
+
+.task-merge-status { flex-shrink: 0; margin: 12px 20px 0; padding: 12px; border: 1px solid #87551f; background: #302212; color: #f5c58e; font-size: .875rem; line-height: 1.5; }
+.task-merge-status details { margin-top: 8px; }
+.task-merge-status pre { max-height: 100px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.merge-actions { display: flex; gap: 8px; margin-top: 8px; }

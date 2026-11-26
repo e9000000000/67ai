@@ -25,7 +25,7 @@ await submit(new Map([['max_workers','1']]));
 assert.equal(saved.parallelism,false);
 runInNewContext(source.slice(source.indexOf('const needsAttention'),source.indexOf('const duration')) + source.slice(source.indexOf('function difficultyBadge('),source.indexOf('function modal(')),ui);
 const orange=ui.card({id:'t',title:'Completed',status:'done',awaiting_merge:true,error:'Conflict'});
-assert.match(orange,/awaiting-merge/); assert.match(orange,/Merge needs attention/);
+assert.match(orange,/awaiting-merge/); assert.match(orange,/Merge failed - open to retry/);
 assert.match(orange,/draggable="false"/); assert.doesNotMatch(orange,/needs-attention/);
 assert.doesNotMatch(ui.card({id:'t',title:'Merged',status:'done'}),/awaiting-merge/);
 const receipt={role:'system',text:'Merged into main.\nCommit: abc123\nProject: C:\\project'};
@@ -142,8 +142,37 @@ try {
   assert.equal(git(repo,'status','--porcelain'),'');
   // Retry invokes the resolver again, then commits without manual Git repair.
   settings={...settings,hard_model:'merge-success'};
-  await action({action:'settings',...settings,paused:false});
-  await action({action:'retry_merge',id:conflict});
+  if(process.env.PLAYWRIGHT_MODULE) {
+    await action({action:'settings',...settings,paused:true});
+    const {chromium}=await import(pathToFileURL(path.resolve(process.env.PLAYWRIGHT_MODULE)).href);
+    const browser=await chromium.launch({channel:'msedge',headless:true,args:['--mute-audio']});
+    try {
+      const page=await browser.newPage({viewport:{width:1280,height:900}});
+      await page.goto(url);
+      await page.locator(`[data-task="${conflict}"]`).click();
+      const banner=page.locator('#task-merge-status');
+      await banner.getByText('Merge failed',{exact:true}).waitFor();
+      assert.match(await banner.innerText(),/Retry merge runs automatic repair again/);
+      assert.equal(await page.locator('#message-form').isVisible(),false);
+      await banner.locator('summary').click();
+      assert.match(await banner.locator('pre').innerText(),/unresolved conflicts/);
+      for(const width of [1280,390]) {
+        await page.setViewportSize({width,height:850});
+        await page.locator('#messages').evaluate(el=>el.scrollTop=el.scrollHeight);
+        const box=await page.locator('#retry-merge').boundingBox();
+        assert(box&&box.y>=0&&box.y+box.height<850&&box.x>=0&&box.x+box.width<=width);
+      }
+      await page.screenshot({path:path.join(root,'merge-failure.png')});
+      await page.locator('#retry-merge').click();
+      await until(d=>!d.tasks.find(t=>t.id===conflict).error);
+      await page.locator('#resume-merge-queue').click();
+      await banner.waitFor({state:'hidden'});
+      await page.locator('#message-form').waitFor({state:'visible'});
+    } finally {await browser.close();}
+  } else {
+    await action({action:'settings',...settings,paused:false});
+    await action({action:'retry_merge',id:conflict});
+  }
   d=await until(d=>!d.tasks.find(t=>t.id===conflict).awaiting_merge);
   const merged=d.tasks.find(t=>t.id===conflict);
   assert.equal(merged.error,null);
